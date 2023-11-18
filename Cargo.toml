@@ -1,0 +1,16 @@
+[package]
+name = "HavokRust"
+license = "MIT"
+authors = ["Gavin Hurlbut <gjhurlbu@gmail.com>"]
+version = "0.0.1"
+edition = "2018"
+publish = false
+
+[dependencies]
+aws-config = { version = "0.101.0", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "0.38.0"
+eosio = "0.3.1"
+serde_cbor = "0.11"
+serde_json = "1.0"
+tokio-serde = { version = "0.8", features = ["json", "cbor"] }
+tokio = { version = "1", features = ["full"] }
