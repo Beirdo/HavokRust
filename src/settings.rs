@@ -1,6 +1,6 @@
 extern crate directories;
 
-use crate::send_log;
+use crate::logging::*;
 use config::{Config, ConfigError, Environment, File};
 use directories::ProjectDirs;
 use serde_derive::Deserialize;
@@ -71,7 +71,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new(appname: &str, logqueue: &mpsc::Sender<String>) -> Result<Self, ConfigError> {
+    pub fn new(appname: &str, logqueue: &mpsc::Sender<LogMessage>) -> Result<Self, ConfigError> {
         send_log(&logqueue, &format!("Loading settings for {}", appname));
 
         let run_mode = env::var("HAVOK_RUN_MODE").unwrap_or_else(|_| "development".into());

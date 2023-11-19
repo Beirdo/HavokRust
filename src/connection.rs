@@ -1,5 +1,5 @@
 use crate::server::Message;
-use crate::send_log;
+use crate::logging::*;
 use tokio::sync::mpsc;
 use std::net::SocketAddr;
 
@@ -11,7 +11,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(logqueue: &mpsc::Sender<String>, txsender: &mpsc::Sender<Message>, addr: SocketAddr) -> Result<Self, ()> {
+    pub fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<Message>, addr: SocketAddr) -> Result<Self, ()> {
         send_log(logqueue, &format!("New connection from {:?}", addr));
 
         let s = Connection {

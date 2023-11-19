@@ -4,15 +4,14 @@ extern crate tokio;
 mod settings;
 mod server;
 mod connection;
+mod logging;
 
-use simplelog::*;
-use std::fs::OpenOptions;
 use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, Barrier};
-use tokio::task;
 use settings::Settings;
 use server::do_server_thread;
+use logging::*;
 use std::sync::Arc;
 
 
@@ -23,126 +22,12 @@ pub enum ControlSignal {
 }
 
 
-pub fn send_log(logqueue: &mpsc::Sender<String>, message: &str) {
-    logqueue.try_send(String::from(message)).unwrap();
-}
-
-// TODO: make this actually work for reconfiguration
-fn init_logging(settings: Settings) {
-    let log_file = String::clone(&settings.global.log_file);
-
-    CombinedLogger::init(vec![
-        TermLogger::new(
-            LevelFilter::Info,
-            ConfigBuilder::new()
-                .set_thread_level(LevelFilter::Debug)
-                .set_target_level(LevelFilter::Debug)
-                .set_location_level(LevelFilter::Debug)
-                .set_thread_mode(ThreadLogMode::Both)
-                .build(),
-            TerminalMode::Mixed,
-            ColorChoice::Auto,
-        ),
-        WriteLogger::new(
-            LevelFilter::Info,
-            ConfigBuilder::new()
-                .set_thread_level(LevelFilter::Debug)
-                .set_target_level(LevelFilter::Debug)
-                .set_location_level(LevelFilter::Debug)
-                .set_thread_mode(ThreadLogMode::Both)
-                .build(),
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_file)
-                .unwrap(),
-        )
-    ]).unwrap_or_else(|_| {});
-
-}
-
-async fn do_log_thread(barrier: Arc<Barrier>, mut ctlqueue: broadcast::Receiver<ControlSignal>, logtxqueue: &mpsc::Sender<String>, 
-                       mut logqueue: mpsc::Receiver<String>) {
-    let mut shutdown = false;
-    let mut initialized = false;
-    let mut draining = false;
-    let mut drained = false;
-
-    send_log(&logtxqueue, "Starting logging thread");
-
-    let _ = barrier.wait().await;
-
-    let mut settings: Settings;
-    while !initialized {
-        let ctlmsg = ctlqueue.recv().await.unwrap();
-        match ctlmsg {
-            ControlSignal::Shutdown => shutdown = true,
-            ControlSignal::Reconfigure(new_settings) => {
-                send_log(logtxqueue, "Configuring logging thread");
-                settings = new_settings.clone();
-                init_logging(settings);
-                initialized = true;
-            },
-        }
-    }
-
-    while !shutdown || draining {
-        let mut a = None;
-        let mut b = None;
-
-        while a.is_none() && b.is_none() && !drained {
-            tokio::select! {
-                v = logqueue.recv() => {
-                    if v.is_none() {
-                        draining = false;
-                        drained = true;
-                        info!("Logs drained.");
-                    } else {
-                        a = Some(v.unwrap());
-                    }
-                }, 
-                v = ctlqueue.recv() => b = Some(v.unwrap()),
-            }
-        }
-        
-        if !a.is_none() {
-            info!("{}", a.unwrap().to_owned());
-        }
-
-        if !b.is_none() {
-            match b.unwrap() {
-                ControlSignal::Shutdown => {
-                    shutdown = true;
-                    draining = true;
-                    drained = false;
-
-                    // Allow all other tasks to log dying gasps.
-                    task::yield_now().await;
-                    info!("Draining logs");
-                    logqueue.close();
-                },
-                ControlSignal::Reconfigure(new_settings) => {
-                    send_log(logtxqueue, "Reconfiguring logging thread");
-                    settings = new_settings.clone();
-                    init_logging(settings);
-                },
-            }
-        }
-    }
-
-    drop(logqueue);
-    drop(ctlqueue);
-
-    info!("Shutting down Logging thread");
-}
-
-
 #[tokio::main]
 async fn main() {
     let mut shutdown = false;
     let appname: String = String::from("HavokMudRust");
     
-    let (logtx, logrx) = mpsc::channel::<String>(256);
+    let (logtx, logrx) = mpsc::channel::<LogMessage>(256);
 
     send_log(&logtx, &format!("Starting {}", appname));
 

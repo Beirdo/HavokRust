@@ -2,7 +2,7 @@ extern crate tokio;
 
 use crate::settings::Settings;
 use crate::connection::Connection;
-use crate::send_log;
+use crate::logging::*;
 use crate::ControlSignal;
 use std::net::SocketAddr;
 use tokio::net::{TcpSocket, TcpListener, TcpStream};
@@ -28,15 +28,13 @@ pub struct Server {
     wizlock_reason: String,
     aws_profile: String,
     settings: Option<Settings>,
-    logqueue: mpsc::Sender<String>,
+    logqueue: mpsc::Sender<LogMessage>,
     pub connections: HashMap<SocketAddr, Connection>,
     pub streams: HashMap<SocketAddr, Arc<RwLock<TcpStream>>>,
 }
 
 impl Server {    
-    fn new(logqueue: &mpsc::Sender<String>, settings: Option<Settings>) -> Result<Self, ()> {
-        send_log(logqueue, "Creating new server");
-
+    fn new(logqueue: &mpsc::Sender<LogMessage>, settings: Option<Settings>) -> Result<Self, ()> {
         if settings.is_none() {
             let s = Server {
                 bind_ip: "".to_string(),
@@ -52,6 +50,7 @@ impl Server {
             return Ok(s);
         }
 
+        send_log(logqueue, "Creating new server");
         let conf = settings.unwrap();
 
         let s = Server {
@@ -115,6 +114,9 @@ impl Server {
         }
     }
 
+    pub fn get_settings(&mut self) -> Settings {
+        return self.settings.clone().unwrap();
+    }
 }
 
 
@@ -134,7 +136,7 @@ async fn write_message(item: &mut Arc<RwLock<TcpStream>>, data: &[u8]) {
     };
 }
 
-pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>, logqueue: &mpsc::Sender<String>) {
+pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>, logqueue: &mpsc::Sender<LogMessage>) {
     let mut shutdown = false;
     let mut initialized = false;
     let mut server = Server::new(logqueue, None).unwrap();
@@ -189,9 +191,10 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sende
             },
             v = accept_connection(&mut listener) => {
                 let (stream, addr) = v.unwrap();
-                let connection = Connection::new(logqueue, &txsender, addr).unwrap();
-                server.connections.insert(addr, connection);
+                let mut connection = Connection::new(logqueue, &txsender, addr).unwrap();
+                server.connections.insert(addr, connection.clone());
                 server.streams.insert(addr, Arc::new(RwLock::new(stream)));
+                connection.send_message(format!("Welcome to {}\n", server.get_settings().mud.name).as_bytes()).await;
             },
             v = txreceiver.recv() => {
                 server.send_message(v.unwrap().clone()).await;
