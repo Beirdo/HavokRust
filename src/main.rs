@@ -9,11 +9,11 @@ use simplelog::*;
 use std::fs::OpenOptions;
 use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::mpsc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, Barrier};
 use tokio::task;
 use settings::Settings;
 use server::do_server_thread;
+use std::sync::Arc;
 
 
 #[derive(Debug, Clone)]
@@ -61,13 +61,16 @@ fn init_logging(settings: Settings) {
 
 }
 
-async fn do_log_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logtxqueue: &mpsc::Sender<String>, mut logqueue: mpsc::Receiver<String>) {
+async fn do_log_thread(barrier: Arc<Barrier>, mut ctlqueue: broadcast::Receiver<ControlSignal>, logtxqueue: &mpsc::Sender<String>, 
+                       mut logqueue: mpsc::Receiver<String>) {
     let mut shutdown = false;
     let mut initialized = false;
     let mut draining = false;
     let mut drained = false;
 
     send_log(&logtxqueue, "Starting logging thread");
+
+    let _ = barrier.wait().await;
 
     let mut settings: Settings;
     while !initialized {
@@ -148,13 +151,17 @@ async fn main() {
 
     let (ctltx, mut ctlrx) = broadcast::channel::<ControlSignal>(4);
 
+    let thread_count = 4; // no barrier in Ctrl-C handler, but include the main thread
+    let barrier = Arc::new(Barrier::new(thread_count));
+
     let mut task_handle_list = vec![]; 
 
     // Start logging thread
+    let log_barrier = barrier.clone();
     let log_ctlrx = ctltx.subscribe();
     let log_logtx = logtx.clone();
     let log_handle = tokio::spawn(async move {
-         do_log_thread(log_ctlrx, &log_logtx, logrx).await; 
+         do_log_thread(log_barrier, log_ctlrx, &log_logtx, logrx).await; 
     });
     task_handle_list.push(log_handle);
     
@@ -168,12 +175,15 @@ async fn main() {
     task_handle_list.push(ctrlc_handle);
 
     // Start SIGHUP handler thread
+    let sighup_barrier = barrier.clone();
     let sighup_ctltx = ctltx.clone();
     let mut sighup_ctlrx = ctltx.subscribe();
     let sighup_logtx = logtx.clone();
     let sighup_handle = tokio::spawn(async move {
         send_log(&sighup_logtx, "Starting SIGHUP Handler thread");
     
+        let _ = sighup_barrier.wait().await;
+
         let mut stream = signal(SignalKind::hangup()).unwrap();
         let mut shutdown = false;
 
@@ -199,13 +209,16 @@ async fn main() {
     task_handle_list.push(sighup_handle);
 
     // Now we need to start the server thread
+    let server_barrier = barrier.clone();
     let server_ctltx = ctltx.clone();
     let server_logtx = logtx.clone();
     let server_handle = tokio::spawn(async move {
-        do_server_thread(server_ctltx, &server_logtx).await;
+        do_server_thread(server_barrier, server_ctltx, &server_logtx).await;
     });
     task_handle_list.push(server_handle);
-    
+
+    // Now wait for all the barriers
+    let _ = barrier.wait().await;
 
     // Send the settings to all threads that care.
     let ctrlsignal = ControlSignal::Reconfigure(settings.clone());
@@ -215,7 +228,10 @@ async fn main() {
         let ctlmsg = ctlrx.recv().await.unwrap();
         match ctlmsg {
             ControlSignal::Shutdown => shutdown = true,
-            ControlSignal::Reconfigure(new_settings) => settings = new_settings.clone(),
+            ControlSignal::Reconfigure(new_settings) => {
+                settings = new_settings.clone();
+                send_log(&logtx, &format!("New Settings: {:?}", settings));
+            },
         }
     } 
 

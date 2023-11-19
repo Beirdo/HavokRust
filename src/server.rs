@@ -6,13 +6,12 @@ use crate::send_log;
 use crate::ControlSignal;
 use std::net::SocketAddr;
 use tokio::net::{TcpSocket, TcpListener, TcpStream};
+use tokio::io;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use tokio::sync::broadcast;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, RwLock, Barrier};
+use std::sync::Arc;
 use tokio::task;
 use std::collections::HashMap;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -31,7 +30,7 @@ pub struct Server {
     settings: Option<Settings>,
     logqueue: mpsc::Sender<String>,
     pub connections: HashMap<SocketAddr, Connection>,
-    pub streams: Rc<RefCell<HashMap<SocketAddr, TcpStream>>>,
+    pub streams: HashMap<SocketAddr, Arc<RwLock<TcpStream>>>,
 }
 
 impl Server {    
@@ -48,7 +47,7 @@ impl Server {
                 settings: None,
                 logqueue: logqueue.clone(),
                 connections: HashMap::new(),
-                streams: Rc::new(RefCell::new(HashMap::new())),
+                streams: HashMap::new(),
             };
             return Ok(s);
         }
@@ -64,13 +63,13 @@ impl Server {
             settings: Some(conf.clone()),
             logqueue: logqueue.clone(),
             connections: HashMap::new(),
-            streams: Rc::new(RefCell::new(HashMap::new())),
+            streams: HashMap::new(),
         };
 
         return Ok(s);
     }
 
-    pub fn start_server(&mut self) -> Rc<RefCell<Option<TcpListener>>> {
+    pub fn start_server(&mut self) -> Arc<RwLock<Option<TcpListener>>> {
         let mut listener = None;
         if !self.settings.is_none() {
             let addr = format!("{}:{}", self.bind_ip, self.port);
@@ -88,25 +87,26 @@ impl Server {
             send_log(&self.logqueue, &format!("Binding to {}", addr));
             let _ = socket.set_reuseaddr(true);
             let _ = socket.bind(bind_addr);
-            listener = Some(socket.listen(1024).unwrap_or_else(|e| panic!("Could not listen on {}", addr)));
+            listener = Some(socket.listen(1024).unwrap_or_else(|e| panic!("Could not listen on {}: {:?}", addr, e)));
         }
-        return Rc::new(RefCell::new(listener));
+        return Arc::new(RwLock::new(listener));
     }
 
+ 
     pub async fn send_message(&mut self, message: Message) {
         let msgdata = message.data.as_slice();
         let disconnect: bool = message.data.len() == 0;
-        let mut streams = self.streams.borrow_mut();
+        let streams = &mut self.streams;
 
         for addr in message.dest {
             match streams.get_mut(&addr) {
-                Some(stream) => {
+                Some(item) => {
                     if disconnect {
-                        let _ = (*stream).shutdown().await;
+                        shutdown_stream(item).await;
                         streams.remove(&addr);
                         self.connections.remove(&addr);
                     } else {
-                        let _ = (*stream).write_all(msgdata).await;
+                        write_message(item, msgdata).await;
                     }
                 },
                 None => {},
@@ -118,33 +118,49 @@ impl Server {
 }
 
 
-pub async fn do_server_thread(ctlsender: broadcast::Sender<ControlSignal>, logqueue: &mpsc::Sender<String>) {
+async fn shutdown_stream(item: &mut Arc<RwLock<TcpStream>>) {
+    let mutex_clone = Arc::clone(item);
+    let _ = { 
+        let mut stream = mutex_clone.write().await;
+        stream.shutdown().await 
+    };
+}
+
+async fn write_message(item: &mut Arc<RwLock<TcpStream>>, data: &[u8]) {
+    let mutex_clone = Arc::clone(item);
+    let _ = {
+        let mut stream = mutex_clone.write().await;
+        stream.write_all(data).await
+    };
+}
+
+pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>, logqueue: &mpsc::Sender<String>) {
     let mut shutdown = false;
     let mut initialized = false;
     let mut server = Server::new(logqueue, None).unwrap();
-    let mut listener_wrapped = server.start_server();
+    let mut listener = server.start_server().clone();
     let mut ctlqueue = ctlsender.subscribe();
+
+    send_log(logqueue, "Starting server thread");
+
+    let _ = barrier.wait().await;
 
     // Shared transmit queue (MUD -> player connection)
     let (mut txsender, mut txreceiver) = mpsc::channel::<Message>(2048);
     
-    send_log(logqueue, "Starting server thread");
-
     while !initialized {
         let ctlmsg = ctlqueue.recv().await.unwrap();
         match ctlmsg {
             ControlSignal::Shutdown => shutdown = true,
             ControlSignal::Reconfigure(new_settings) => {
                 server = Server::new(logqueue, Some(new_settings)).unwrap();
-                listener_wrapped = server.start_server();
+                listener = server.start_server().clone();
                 initialized = true;
             },
         }           
     }
 
     while !shutdown {
-        let listener = unsafe { (&*(Rc::as_ptr(&listener_wrapped))).as_ptr().as_ref() }.unwrap().as_ref().unwrap();
-
         tokio::select! {
             v = ctlqueue.recv() => {
                 match v.unwrap() {
@@ -166,20 +182,30 @@ pub async fn do_server_thread(ctlsender: broadcast::Sender<ControlSignal>, logqu
                             (txsender, txreceiver) = mpsc::channel::<Message>(2048);
                             
                             server = Server::new(logqueue, Some(new_settings)).unwrap();
-                            listener_wrapped = server.start_server();
+                            listener = server.start_server().clone();
                         }
                     },
                 };
             },
-            v = listener.accept() => {
+            v = accept_connection(&mut listener) => {
                 let (stream, addr) = v.unwrap();
                 let connection = Connection::new(logqueue, &txsender, addr).unwrap();
                 server.connections.insert(addr, connection);
-                server.streams.borrow_mut().insert(addr, stream);
+                server.streams.insert(addr, Arc::new(RwLock::new(stream)));
             },
             v = txreceiver.recv() => {
                 server.send_message(v.unwrap().clone()).await;
             }
         }
     }
+}
+
+async fn accept_connection(item: &mut Arc<RwLock<Option<TcpListener>>>) -> io::Result<(TcpStream, SocketAddr)> {
+    let mutex_clone = Arc::clone(item);
+    let result = {
+        let listener = mutex_clone.write().await;
+        let result = listener.as_ref().unwrap().accept().await;
+        result
+    };
+    return result;
 }
