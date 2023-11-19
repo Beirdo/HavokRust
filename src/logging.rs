@@ -3,7 +3,6 @@ extern crate tokio;
 use simplelog::*;
 use std::fs::OpenOptions;
 use tokio::sync::{broadcast, mpsc, Barrier};
-use tokio::task;
 use std::sync::Arc;
 use crate::settings::Settings;
 use crate::ControlSignal;
@@ -76,8 +75,8 @@ pub fn init_logging(settings: Settings) {
 
 }
 
-pub async fn do_log_thread(barrier: Arc<Barrier>, mut ctlqueue: broadcast::Receiver<ControlSignal>, logtxqueue: &mpsc::Sender<LogMessage>, 
-                       mut logqueue: mpsc::Receiver<LogMessage>) {
+pub async fn do_log_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, mut ctlqueue: broadcast::Receiver<ControlSignal>, 
+                           logtxqueue: &mpsc::Sender<LogMessage>, mut logqueue: mpsc::Receiver<LogMessage>) {
     let mut shutdown = false;
     let mut initialized = false;
     let mut draining = false;
@@ -91,7 +90,17 @@ pub async fn do_log_thread(barrier: Arc<Barrier>, mut ctlqueue: broadcast::Recei
     while !initialized {
         let ctlmsg = ctlqueue.recv().await.unwrap();
         match ctlmsg {
-            ControlSignal::Shutdown => shutdown = true,
+            ControlSignal::Shutdown => {
+                shutdown = true;
+                draining = true;
+                drained = false;
+
+                // Allow all other tasks to log dying gasps.
+                shutdown_barrier.wait().await;
+
+                info!("Draining logs");
+                logqueue.close();
+        },
             ControlSignal::Reconfigure(new_settings) => {
                 send_log(logtxqueue, "Configuring logging thread");
                 settings = new_settings.clone();
@@ -101,7 +110,7 @@ pub async fn do_log_thread(barrier: Arc<Barrier>, mut ctlqueue: broadcast::Recei
         }
     }
 
-    while !shutdown || draining {
+    while (!shutdown || draining) && !drained {
         let mut a = None;
         let mut b = None;
 
@@ -140,7 +149,8 @@ pub async fn do_log_thread(barrier: Arc<Barrier>, mut ctlqueue: broadcast::Recei
                     drained = false;
 
                     // Allow all other tasks to log dying gasps.
-                    task::yield_now().await;
+                    shutdown_barrier.wait().await;
+
                     info!("Draining logs");
                     logqueue.close();
                 },

@@ -5,6 +5,8 @@ use crate::connection::Connection;
 use crate::logging::*;
 use crate::ControlSignal;
 use std::net::SocketAddr;
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpSocket, TcpListener, TcpStream};
 use tokio::io;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -30,7 +32,8 @@ pub struct Server {
     settings: Option<Settings>,
     logqueue: mpsc::Sender<LogMessage>,
     pub connections: HashMap<SocketAddr, Connection>,
-    pub streams: HashMap<SocketAddr, Arc<RwLock<TcpStream>>>,
+    pub wr_streams: HashMap<SocketAddr, Arc<RwLock<OwnedWriteHalf>>>,
+    pub rd_streams: HashMap<SocketAddr, Arc<RwLock<OwnedReadHalf>>>,
 }
 
 impl Server {    
@@ -45,7 +48,8 @@ impl Server {
                 settings: None,
                 logqueue: logqueue.clone(),
                 connections: HashMap::new(),
-                streams: HashMap::new(),
+                wr_streams: HashMap::new(),
+                rd_streams: HashMap::new(),
             };
             return Ok(s);
         }
@@ -62,7 +66,8 @@ impl Server {
             settings: Some(conf.clone()),
             logqueue: logqueue.clone(),
             connections: HashMap::new(),
-            streams: HashMap::new(),
+            wr_streams: HashMap::new(),
+            rd_streams: HashMap::new(),
         };
 
         return Ok(s);
@@ -94,17 +99,24 @@ impl Server {
  
     pub async fn send_message(&mut self, message: Message) {
         let msgdata = message.data.as_slice();
-        let disconnect: bool = message.data.len() == 0;
-        let streams = &mut self.streams;
+        let data_len = message.data.len();
+        let disconnect: bool = data_len == 0;
+        let wr_streams = &mut self.wr_streams;
+        let rd_streams = &mut self.rd_streams;
 
         for addr in message.dest {
-            match streams.get_mut(&addr) {
+            match wr_streams.get_mut(&addr) {
                 Some(item) => {
                     if disconnect {
+                        send_log(&self.logqueue, &format!("Disconnecting {:?}", addr));
                         shutdown_stream(item).await;
-                        streams.remove(&addr);
+                        let wr_stream = wr_streams.remove(&addr);
+                        let rd_stream = rd_streams.remove(&addr);
+                        drop(wr_stream);
+                        drop(rd_stream);
                         self.connections.remove(&addr);
                     } else {
+                        send_log(&self.logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
                         write_message(item, msgdata).await;
                     }
                 },
@@ -120,7 +132,7 @@ impl Server {
 }
 
 
-async fn shutdown_stream(item: &mut Arc<RwLock<TcpStream>>) {
+async fn shutdown_stream(item: &mut Arc<RwLock<OwnedWriteHalf>>) {
     let mutex_clone = Arc::clone(item);
     let _ = { 
         let mut stream = mutex_clone.write().await;
@@ -128,7 +140,7 @@ async fn shutdown_stream(item: &mut Arc<RwLock<TcpStream>>) {
     };
 }
 
-async fn write_message(item: &mut Arc<RwLock<TcpStream>>, data: &[u8]) {
+async fn write_message(item: &mut Arc<RwLock<OwnedWriteHalf>>, data: &[u8]) {
     let mutex_clone = Arc::clone(item);
     let _ = {
         let mut stream = mutex_clone.write().await;
@@ -136,7 +148,8 @@ async fn write_message(item: &mut Arc<RwLock<TcpStream>>, data: &[u8]) {
     };
 }
 
-pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>, logqueue: &mpsc::Sender<LogMessage>) {
+pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>, 
+                              logqueue: &mpsc::Sender<LogMessage>) {
     let mut shutdown = false;
     let mut initialized = false;
     let mut server = Server::new(logqueue, None).unwrap();
@@ -171,7 +184,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sende
                         send_log(logqueue, "Reconfiguring server thread");
                         if  new_settings.mud.bind_ip != server.bind_ip || new_settings.mud.port != server.port {
                             for (_, mut connection) in server.connections.drain() {
-                                connection.disconnect(format!("Server shutting down")).await;
+                                connection.disconnect(format!("Server shutting down\n")).await;
                             }
                             task::yield_now().await;
                             txreceiver.close();
@@ -191,9 +204,12 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sende
             },
             v = accept_connection(&mut listener) => {
                 let (stream, addr) = v.unwrap();
+                let (rd_half, wr_half) = stream.into_split();
+                server.rd_streams.insert(addr, Arc::new(RwLock::new(rd_half)));
+                server.wr_streams.insert(addr, Arc::new(RwLock::new(wr_half)));
+
                 let mut connection = Connection::new(logqueue, &txsender, addr).unwrap();
                 server.connections.insert(addr, connection.clone());
-                server.streams.insert(addr, Arc::new(RwLock::new(stream)));
                 connection.send_message(format!("Welcome to {}\n", server.get_settings().mud.name).as_bytes()).await;
             },
             v = txreceiver.recv() => {
@@ -201,6 +217,31 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, ctlsender: broadcast::Sende
             }
         }
     }
+
+    send_log(logqueue, "Closing open connections");
+
+    for (addr, mut connection) in server.connections.clone() {
+        send_log(logqueue, &format!("Closing connection from {:?}", addr));
+        connection.disconnect("Server shutting down\n".to_string()).await;
+    }
+
+    txreceiver.close();
+
+    let mut finished = false;
+    while !finished {
+        tokio::select! {
+            v = txreceiver.recv() => {
+                if v.is_none() {
+                    finished = true;
+                } else {
+                    server.send_message(v.unwrap().clone()).await;
+                }
+            },
+        };
+    }
+
+    send_log(logqueue, "Shutting down server thread");
+    let _ = shutdown_barrier.wait().await;
 }
 
 async fn accept_connection(item: &mut Arc<RwLock<Option<TcpListener>>>) -> io::Result<(TcpStream, SocketAddr)> {
