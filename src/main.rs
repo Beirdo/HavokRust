@@ -187,7 +187,7 @@ async fn main() {
                 }, 
                 _ = stream.recv() => {
                     send_log(&sighup_logtx, "Recieved SIGHUP, reloading config");
-                    let new_settings = Settings::new(&appname, &logtx).unwrap().clone();
+                    let new_settings = Settings::new(&appname, &sighup_logtx).unwrap().clone();
                     let ctrlsignal = ControlSignal::Reconfigure(new_settings.clone());
                     sighup_ctltx.send(ctrlsignal.clone()).unwrap_or_else(|e| panic!("Error: {:?}", e));
                 },
@@ -200,9 +200,9 @@ async fn main() {
 
     // Now we need to start the server thread
     let server_ctltx = ctltx.clone();
-    let server_logtx = &logtx.clone();
+    let server_logtx = logtx.clone();
     let server_handle = tokio::spawn(async move {
-        do_server_thread(server_ctltx, server_logtx).await;
+        do_server_thread(server_ctltx, &server_logtx).await;
     });
     task_handle_list.push(server_handle);
     

@@ -143,9 +143,7 @@ pub async fn do_server_thread(ctlsender: broadcast::Sender<ControlSignal>, logqu
     }
 
     while !shutdown {
-        let listener_cell: &RefCell<Option<_>> = unsafe { &*(Rc::as_ptr(&listener_wrapped)) };
-        let listener_ref = unsafe { listener_cell.as_ptr().as_ref() }.unwrap();
-        let listener = listener_ref.as_ref().unwrap();
+        let listener = unsafe { (&*(Rc::as_ptr(&listener_wrapped))).as_ptr().as_ref() }.unwrap().as_ref().unwrap();
 
         tokio::select! {
             v = ctlqueue.recv() => {
