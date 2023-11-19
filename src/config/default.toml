@@ -1,0 +1,16 @@
+[mud]
+hostname = "havokmud.havokmud"
+bind_ip = "0.0.0.0"
+port = 3000
+name = "HavokMud"
+wizlocked = false
+wizlock_reason = ""
+
+[dynamodb]
+use_ssl = true
+
+[encryption]
+use_ssl = true
+
+[email]
+use_ssl = true

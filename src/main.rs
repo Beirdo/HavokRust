@@ -2,6 +2,8 @@
 extern crate tokio;
 
 mod settings;
+mod server;
+mod connection;
 
 use simplelog::*;
 use std::fs::OpenOptions;
@@ -9,11 +11,13 @@ use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 use tokio::sync::broadcast;
+use tokio::task;
 use settings::Settings;
+use server::do_server_thread;
 
 
 #[derive(Debug, Clone)]
-enum ControlSignal {
+pub enum ControlSignal {
     Reconfigure(Settings),
     Shutdown,
 }
@@ -23,6 +27,7 @@ pub fn send_log(logqueue: &mpsc::Sender<String>, message: &str) {
     logqueue.try_send(String::from(message)).unwrap();
 }
 
+// TODO: make this actually work for reconfiguration
 fn init_logging(settings: Settings) {
     let log_file = String::clone(&settings.global.log_file);
 
@@ -107,6 +112,9 @@ async fn do_log_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logtxqu
                     shutdown = true;
                     draining = true;
                     drained = false;
+
+                    // Allow all other tasks to log dying gasps.
+                    task::yield_now().await;
                     info!("Draining logs");
                     logqueue.close();
                 },
@@ -190,6 +198,16 @@ async fn main() {
     });
     task_handle_list.push(sighup_handle);
 
+    // Now we need to start the server thread
+    let server_ctltx = ctltx.clone();
+    let server_logtx = &logtx.clone();
+    let server_handle = tokio::spawn(async move {
+        do_server_thread(server_ctltx, server_logtx).await;
+    });
+    task_handle_list.push(server_handle);
+    
+
+    // Send the settings to all threads that care.
     let ctrlsignal = ControlSignal::Reconfigure(settings.clone());
     ctltx.send(ctrlsignal.clone()).unwrap_or_else(|e| panic!("Error: {:?}", e));
 

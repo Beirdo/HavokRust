@@ -1,5 +1,6 @@
 extern crate directories;
 
+use crate::send_log;
 use config::{Config, ConfigError, Environment, File};
 use directories::ProjectDirs;
 use serde_derive::Deserialize;
@@ -7,7 +8,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use tokio::sync::mpsc;
-use super::send_log;
+
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Global {
@@ -17,11 +18,56 @@ pub struct Global {
     pub run_mode: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct Mud {
+    pub hostname: String,
+    pub bind_ip: String,
+    pub port: u16,
+    pub name: String,
+    pub wizlocked: bool,
+    pub wizlock_reason: String,
+    pub aws_region: String,
+    pub aws_profile: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DynamoDb {
+    pub endpoint: String,
+    pub use_ssl: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Redis {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Encryption {
+    pub endpoint: String,
+    pub use_ssl: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Email {
+    pub mocked: bool,
+    pub domain: String,
+    pub admin: String,
+    pub endpoint: String,
+    pub use_ssl: bool,
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
 #[allow(unused)]
 pub struct Settings {
     pub debug: bool,
     pub global: Global,
+    pub mud: Mud,
+    pub dynamodb: DynamoDb,
+    pub redis: Redis,
+    pub encryption: Encryption,
+    pub email: Email,
 }
 
 impl Settings {
@@ -64,11 +110,11 @@ impl Settings {
             // Set defaults
             .set_default("debug", false)?
             // Start off with merging in the "default" config file
-            .add_source(File::with_name(&format!("{}/default", config_dir)).required(false))
+            .add_source(File::with_name(&format!("{}/default.toml", config_dir)).required(false))
             // Add in current environment file (defaulting to development)
-            .add_source(File::with_name(&format!("{}/{}", config_dir, run_mode)).required(false))
+            .add_source(File::with_name(&format!("{}/{}.toml", config_dir, run_mode)).required(false))
             // Add in local file
-            .add_source(File::with_name(&format!("{}/local", config_dir)).required(false))
+            .add_source(File::with_name(&format!("{}/local.toml", config_dir)).required(false))
             // Add in settings from environment prefixed with "HAVOK_"
             .add_source(Environment::with_prefix("havok"))
             .set_override("global.config_dir", config_dir)?

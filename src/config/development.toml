@@ -1,1 +1,24 @@
 debug = true
+
+[mud]
+aws_region = "us-east-1"
+aws_profile = "localstack"
+
+[dynamodb]
+endpoint = "http://localstack-main:4569"
+use_ssl = false
+
+[redis]
+host = "172.18.0.1"
+port = "6379"
+
+[encryption]
+endpoint = "http://localstack-main:4584"
+use_ssl = false
+
+[email]
+mocked = true
+domain = "havokmud.testing.net"
+admin = "havokmud-admin"
+endpoint = "http://localstack-main:4579"
+use_ssl = false
