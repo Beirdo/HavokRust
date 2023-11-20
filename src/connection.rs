@@ -12,6 +12,7 @@ pub struct Connection {
     addr: SocketAddr,
     ansi_mode: bool,
     ansi_colors: Arc<RwLock<AnsiColors>>,
+    logqueue: mpsc::Sender<LogMessage>,
 }
 
 impl Connection {
@@ -23,6 +24,7 @@ impl Connection {
             addr: addr.clone(),
             ansi_mode: true,
             ansi_colors: AnsiColors::get(),
+            logqueue: logqueue.clone(),
         };
 
         return Ok(s);
@@ -64,6 +66,11 @@ impl Connection {
     #[allow(unused)]
     pub async fn send_line(&mut self, message: String) {
         self.send_string(message + "\r\n").await;
+    }
+
+    #[allow(unused)]
+    pub async fn process_message(&mut self, data: &[u8]) {
+        send_log(&self.logqueue, &format!("Received {} bytes from {:?}", data.len(), self.addr));
     }
 
 }

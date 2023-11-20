@@ -14,6 +14,8 @@ use tokio::sync::{broadcast, mpsc, RwLock, Barrier};
 use std::sync::Arc;
 use tokio::task;
 use std::collections::HashMap;
+use tokio::task::JoinHandle;
+use bytes::BytesMut;
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -34,6 +36,7 @@ pub struct Server {
     pub connections: HashMap<SocketAddr, Connection>,
     pub wr_streams: HashMap<SocketAddr, Arc<RwLock<OwnedWriteHalf>>>,
     pub rd_streams: HashMap<SocketAddr, Arc<RwLock<OwnedReadHalf>>>,
+    pub rd_handles: HashMap<SocketAddr, Arc<RwLock<JoinHandle<()>>>>,
 }
 
 impl Server {    
@@ -50,6 +53,7 @@ impl Server {
                 connections: HashMap::new(),
                 wr_streams: HashMap::new(),
                 rd_streams: HashMap::new(),
+                rd_handles: HashMap::new(),
             };
             return Ok(s);
         }
@@ -68,6 +72,7 @@ impl Server {
             connections: HashMap::new(),
             wr_streams: HashMap::new(),
             rd_streams: HashMap::new(),
+            rd_handles: HashMap::new(),
         };
 
         return Ok(s);
@@ -126,6 +131,38 @@ impl Server {
         }
     }
 
+
+    pub async fn receive_message(&mut self, message: Message) {
+        let msgdata = message.data.as_slice();
+        let data_len = message.data.len();
+        let disconnect: bool = data_len == 0;
+        let wr_streams = &mut self.wr_streams;
+        let rd_streams = &mut self.rd_streams;
+
+        for addr in message.dest {
+            match self.connections.get_mut(&addr) {
+                Some(item) => {
+                    if disconnect {
+                        send_log(&self.logqueue, &format!("Disconnecting {:?}", addr));
+                        let wr_stream = wr_streams.remove(&addr);
+                        let rd_stream = rd_streams.remove(&addr);
+                        if !wr_stream.is_none() {
+                            let mut stream = wr_stream.clone().unwrap();
+                            shutdown_stream(&mut stream).await;
+                        }
+                        drop(wr_stream);
+                        drop(rd_stream);
+                        self.connections.remove(&addr);
+                    } else {
+                        send_log(&self.logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
+                        item.process_message(msgdata).await;
+                    }
+                },
+                None => {},
+            }
+        }
+    }
+
     pub fn get_settings(&mut self) -> Settings {
         return self.settings.clone().unwrap();
     }
@@ -162,6 +199,9 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
 
     // Shared transmit queue (MUD -> player connection)
     let (mut txsender, mut txreceiver) = mpsc::channel::<Message>(2048);
+
+    // Setup receive queue (player connection -> MUD)
+    let (rxsender, mut rxreceiver) = mpsc::channel::<Message>(2048);
     
     while !initialized {
         let ctlmsg = ctlqueue.recv().await.unwrap();
@@ -205,16 +245,28 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
             v = accept_connection(&mut listener) => {
                 let (stream, addr) = v.unwrap();
                 let (rd_half, wr_half) = stream.into_split();
-                server.rd_streams.insert(addr, Arc::new(RwLock::new(rd_half)));
+                let rd_stream = Arc::new(RwLock::new(rd_half));
+                server.rd_streams.insert(addr, rd_stream.clone());
                 server.wr_streams.insert(addr, Arc::new(RwLock::new(wr_half)));
+
+                let rd_ctlrx = ctlsender.subscribe();
+                let rd_logqueue = logqueue.clone();
+                let rd_dataqueue = rxsender.clone();
+                let rd_handle = tokio::spawn(async move {
+                    do_read_thread(rd_ctlrx, &rd_logqueue, &rd_dataqueue, addr, rd_stream.clone()).await; 
+                });
+                server.rd_handles.insert(addr, Arc::new(RwLock::new(rd_handle)));
 
                 let mut connection = Connection::new(logqueue, &txsender, addr).unwrap();
                 server.connections.insert(addr, connection.clone());
-                connection.send_line(format!("$c020PWelcome to {}", server.get_settings().mud.name)).await;
+                connection.send_line(format!("Hi! $c020PWelcome$c0007 to $c000b{}", server.get_settings().mud.name)).await;
             },
             v = txreceiver.recv() => {
                 server.send_message(v.unwrap().clone()).await;
-            }
+            },
+            v = rxreceiver.recv() => {
+                server.receive_message(v.unwrap().clone()).await;
+            },
         }
     }
 
@@ -253,3 +305,47 @@ async fn accept_connection(item: &mut Arc<RwLock<Option<TcpListener>>>) -> io::R
     };
     return result;
 }
+
+async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logqueue: &mpsc::Sender<LogMessage>, dataqueue: &mpsc::Sender<Message>, addr: SocketAddr, 
+                        stream: Arc<RwLock<OwnedReadHalf>>) {
+    let mut shutdown = false;
+    let mut buffer = BytesMut::with_capacity(1024);
+    let mut rd_stream = stream.write().await;
+
+    while !shutdown {
+        tokio::select! {
+            v = ctlqueue.recv() => {
+                match v.unwrap() {
+                    ControlSignal::Shutdown => shutdown = true,
+                    ControlSignal::Reconfigure(_) => {},
+                };
+            },
+            v = rd_stream.read_buf(&mut buffer) => {
+                if v.is_err() {
+                    let err = v.err();
+                    send_log(&logqueue, &format!("Error on read from {:?}: {:?}", addr, err));
+                    shutdown = true;
+                } else {
+                    let bytes_read = v.unwrap();
+                    if bytes_read == 0 {
+                        shutdown = true;
+                    } else {
+                        let message = Message {
+                            dest: [addr].to_vec(),
+                            data: buffer[..].to_vec(),
+                        };
+                        let _ = dataqueue.send(message).await;
+                    }
+
+                    buffer.clear();
+                }
+            }
+        }
+    }
+
+    let message = Message {
+        dest: [addr].to_vec(),
+        data: vec![],
+    };
+    let _ = dataqueue.send(message).await;
+} 
