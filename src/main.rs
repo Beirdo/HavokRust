@@ -5,6 +5,7 @@ mod settings;
 mod server;
 mod connection;
 mod logging;
+mod ansicolors;
 
 use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
@@ -13,6 +14,8 @@ use settings::Settings;
 use server::do_server_thread;
 use logging::*;
 use std::sync::Arc;
+
+use crate::ansicolors::AnsiColors;
 
 
 #[derive(Debug, Clone)]
@@ -30,6 +33,8 @@ async fn main() {
     let (logtx, logrx) = mpsc::channel::<LogMessage>(256);
 
     send_log(&logtx, &format!("Starting {}", appname));
+
+    AnsiColors::set_logqueue(&logtx);
 
     let mut settings = Settings::new(&appname, &logtx).unwrap().clone();
     send_log(&logtx, &format!("Settings: {:?}", settings));

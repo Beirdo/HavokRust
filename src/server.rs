@@ -184,7 +184,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                         send_log(logqueue, "Reconfiguring server thread");
                         if  new_settings.mud.bind_ip != server.bind_ip || new_settings.mud.port != server.port {
                             for (_, mut connection) in server.connections.drain() {
-                                connection.disconnect(format!("Server shutting down\n")).await;
+                                connection.disconnect(format!("Server shutting down")).await;
                             }
                             task::yield_now().await;
                             txreceiver.close();
@@ -210,7 +210,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
 
                 let mut connection = Connection::new(logqueue, &txsender, addr).unwrap();
                 server.connections.insert(addr, connection.clone());
-                connection.send_message(format!("Welcome to {}\n", server.get_settings().mud.name).as_bytes()).await;
+                connection.send_line(format!("$c020PWelcome to {}", server.get_settings().mud.name)).await;
             },
             v = txreceiver.recv() => {
                 server.send_message(v.unwrap().clone()).await;
@@ -222,7 +222,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
 
     for (addr, mut connection) in server.connections.clone() {
         send_log(logqueue, &format!("Closing connection from {:?}", addr));
-        connection.disconnect("Server shutting down\n".to_string()).await;
+        connection.disconnect("Server shutting down".to_string()).await;
     }
 
     txreceiver.close();
