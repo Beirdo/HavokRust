@@ -131,37 +131,29 @@ impl Server {
         }
     }
 
-
     pub async fn receive_message(&mut self, message: Message) {
-        let msgdata = message.data.as_slice();
+        let connections = &mut self.connections;
+        let dest = message.dest.clone();
         let data_len = message.data.len();
-        let disconnect: bool = data_len == 0;
-        let wr_streams = &mut self.wr_streams;
-        let rd_streams = &mut self.rd_streams;
 
-        for addr in message.dest {
-            match self.connections.get_mut(&addr) {
+
+        for addr in dest {
+            send_log(&self.logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
+            match connections.get_mut(&addr) {
                 Some(item) => {
-                    if disconnect {
-                        send_log(&self.logqueue, &format!("Disconnecting {:?}", addr));
-                        let wr_stream = wr_streams.remove(&addr);
-                        let rd_stream = rd_streams.remove(&addr);
-                        if !wr_stream.is_none() {
-                            let mut stream = wr_stream.clone().unwrap();
-                            shutdown_stream(&mut stream).await;
+                    let mut sender = item.rxsender.clone();
+                    if !sender.is_none() {
+                        let result = sender.as_mut().unwrap().clone().send(message.clone()).await;
+                        if result.is_err() {
+                            send_error(&self.logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
                         }
-                        drop(wr_stream);
-                        drop(rd_stream);
-                        self.connections.remove(&addr);
-                    } else {
-                        send_log(&self.logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
-                        item.process_message(msgdata).await;
                     }
                 },
                 None => {},
             }
         }
     }
+
 
     pub fn get_settings(&mut self) -> Settings {
         return self.settings.clone().unwrap();
@@ -257,7 +249,8 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                 });
                 server.rd_handles.insert(addr, Arc::new(RwLock::new(rd_handle)));
 
-                let mut connection = Connection::new(logqueue, &txsender, addr).unwrap();
+                let mut connection = Connection::new(logqueue, &txsender, addr);
+                connection.start_processing().await;
                 server.connections.insert(addr, connection.clone());
                 connection.send_line(format!("Hi! $c020PWelcome$c0007 to $c000b{}", server.get_settings().mud.name)).await;
             },
