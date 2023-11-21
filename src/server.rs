@@ -18,8 +18,8 @@ use tokio::task::JoinHandle;
 use bytes::BytesMut;
 
 #[derive(Debug, Clone)]
-pub struct Message {
-    pub dest: Vec<SocketAddr>,
+pub struct NetworkMessage {
+    pub dest: SocketAddr,
     pub data: Vec<u8>,
 }
 
@@ -102,55 +102,50 @@ impl Server {
     }
 
  
-    pub async fn send_message(&mut self, message: Message) {
+    pub async fn send_message(&mut self, message: NetworkMessage) {
         let msgdata = message.data.as_slice();
         let data_len = message.data.len();
         let disconnect: bool = data_len == 0;
         let wr_streams = &mut self.wr_streams;
         let rd_streams = &mut self.rd_streams;
+        let addr = message.dest.clone();
 
-        for addr in message.dest {
-            match wr_streams.get_mut(&addr) {
-                Some(item) => {
-                    if disconnect {
-                        send_log(&self.logqueue, &format!("Disconnecting {:?}", addr));
-                        shutdown_stream(item).await;
-                        let wr_stream = wr_streams.remove(&addr);
-                        let rd_stream = rd_streams.remove(&addr);
-                        drop(wr_stream);
-                        drop(rd_stream);
-                        self.connections.remove(&addr);
-                    } else {
-                        send_log(&self.logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
-                        write_message(item, msgdata).await;
-                    }
-                },
-                None => {},
-            }
-
+        match wr_streams.get_mut(&addr) {
+            Some(item) => {
+                if disconnect {
+                    send_log(&self.logqueue, &format!("Disconnecting {:?}", addr));
+                    shutdown_stream(item).await;
+                    let wr_stream = wr_streams.remove(&addr);
+                    let rd_stream = rd_streams.remove(&addr);
+                    drop(wr_stream);
+                    drop(rd_stream);
+                    self.connections.remove(&addr);
+                } else {
+                    send_log(&self.logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
+                    write_message(item, msgdata).await;
+                }
+            },
+            None => {},
         }
     }
 
-    pub async fn receive_message(&mut self, message: Message) {
+    pub async fn receive_message(&mut self, message: NetworkMessage) {
         let connections = &mut self.connections;
-        let dest = message.dest.clone();
         let data_len = message.data.len();
+        let addr = message.dest.clone();
 
-
-        for addr in dest {
-            send_log(&self.logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
-            match connections.get_mut(&addr) {
-                Some(item) => {
-                    let mut sender = item.rxsender.clone();
-                    if !sender.is_none() {
-                        let result = sender.as_mut().unwrap().clone().send(message.clone()).await;
-                        if result.is_err() {
-                            send_error(&self.logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
-                        }
+        send_log(&self.logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
+        match connections.get_mut(&addr) {
+            Some(item) => {
+                let mut sender = item.rxsender.clone();
+                if !sender.is_none() {
+                    let result = sender.as_mut().unwrap().clone().send(message.clone()).await;
+                    if result.is_err() {
+                        send_error(&self.logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
                     }
-                },
-                None => {},
-            }
+                }
+            },
+            None => {},
         }
     }
 
@@ -190,10 +185,10 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
     let _ = barrier.wait().await;
 
     // Shared transmit queue (MUD -> player connection)
-    let (mut txsender, mut txreceiver) = mpsc::channel::<Message>(2048);
+    let (mut txsender, mut txreceiver) = mpsc::channel::<NetworkMessage>(2048);
 
     // Setup receive queue (player connection -> MUD)
-    let (rxsender, mut rxreceiver) = mpsc::channel::<Message>(2048);
+    let (rxsender, mut rxreceiver) = mpsc::channel::<NetworkMessage>(2048);
     
     while !initialized {
         let ctlmsg = ctlqueue.recv().await.unwrap();
@@ -226,7 +221,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                                 buffer.clear();
                             }
 
-                            (txsender, txreceiver) = mpsc::channel::<Message>(2048);
+                            (txsender, txreceiver) = mpsc::channel::<NetworkMessage>(2048);
                             
                             server = Server::new(logqueue, Some(new_settings)).unwrap();
                             listener = server.start_server().clone();
@@ -299,8 +294,8 @@ async fn accept_connection(item: &mut Arc<RwLock<Option<TcpListener>>>) -> io::R
     return result;
 }
 
-async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logqueue: &mpsc::Sender<LogMessage>, dataqueue: &mpsc::Sender<Message>, addr: SocketAddr, 
-                        stream: Arc<RwLock<OwnedReadHalf>>) {
+async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logqueue: &mpsc::Sender<LogMessage>, dataqueue: &mpsc::Sender<NetworkMessage>, 
+                        addr: SocketAddr, stream: Arc<RwLock<OwnedReadHalf>>) {
     let mut shutdown = false;
     let mut buffer = BytesMut::with_capacity(1024);
     let mut rd_stream = stream.write().await;
@@ -323,8 +318,8 @@ async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logque
                     if bytes_read == 0 {
                         shutdown = true;
                     } else {
-                        let message = Message {
-                            dest: [addr].to_vec(),
+                        let message = NetworkMessage {
+                            dest: addr.clone(),
                             data: buffer[..].to_vec(),
                         };
                         let _ = dataqueue.send(message).await;
@@ -336,8 +331,8 @@ async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logque
         }
     }
 
-    let message = Message {
-        dest: [addr].to_vec(),
+    let message = NetworkMessage {
+        dest: addr.clone(),
         data: vec![],
     };
     let _ = dataqueue.send(message).await;

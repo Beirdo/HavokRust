@@ -1,6 +1,6 @@
 extern crate tokio;
 
-use crate::server::Message;
+use crate::server::NetworkMessage;
 use crate::logging::*;
 use crate::ansicolors::AnsiColors;
 use tokio::sync::mpsc;
@@ -11,18 +11,18 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub struct Connection {
-    txqueue: mpsc::Sender<Message>,
+    txqueue: mpsc::Sender<NetworkMessage>,
     addr: SocketAddr,
     ansi_mode: bool,
     ansi_colors: Arc<RwLock<AnsiColors>>,
     logqueue: mpsc::Sender<LogMessage>,
     rx_process_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     disconnected: bool,
-    pub rxsender: Option<mpsc::Sender<Message>>,
+    pub rxsender: Option<mpsc::Sender<NetworkMessage>>,
 }
 
 impl Connection {
-    pub fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<Message>, addr: SocketAddr) -> Self {
+    pub fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<NetworkMessage>, addr: SocketAddr) -> Self {
         send_log(logqueue, &format!("New connection from {:?}", addr));
 
         let s = Connection {
@@ -41,7 +41,7 @@ impl Connection {
 
     #[allow(unused)]
     pub async fn start_processing(&mut self) {
-        let (rxsender, mut rxreceiver) = mpsc::channel::<Message>(256);
+        let (rxsender, mut rxreceiver) = mpsc::channel::<NetworkMessage>(256);
         self.rxsender = Some(rxsender);
 
         let mut connection = self.clone();
@@ -53,7 +53,7 @@ impl Connection {
     }
 
 
-    async fn do_process_thread(&mut self, logqueue: &mpsc::Sender<LogMessage>, mut rxreceiver: mpsc::Receiver<Message>) {
+    async fn do_process_thread(&mut self, logqueue: &mpsc::Sender<LogMessage>, mut rxreceiver: mpsc::Receiver<NetworkMessage>) {
         let mut incoming_buffer: Vec<u8> = Vec::new();
 
         send_log(&logqueue, &format!("Starting Process Thread for {:?}", self.addr));
@@ -97,8 +97,8 @@ impl Connection {
     pub async fn send_raw(&mut self, message: &[u8]) {
         let mut msgvec = vec![];
         msgvec.extend_from_slice(message);
-        let outmsg = Message {
-            dest: vec![self.addr],
+        let outmsg = NetworkMessage {
+            dest: self.addr.clone(),
             data: msgvec,
         };
         let _ = self.txqueue.send(outmsg).await;
