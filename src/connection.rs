@@ -69,13 +69,19 @@ impl Connection {
             let mut data = self.handle_telnet_commands(msg.data);
             send_log(&logqueue, &format!("After telnet Data: {:?}", data));
             incoming_buffer.append(&mut data);
-            let (line, new_buffer) = self.read_line(incoming_buffer);
-            incoming_buffer = new_buffer;
-            send_log(&logqueue, &format!("Line: {:?}", line));
-            
 
-            if line.len() > 0 {
+            loop {
+                let (mut line, new_buffer) = self.read_line(incoming_buffer);
+                incoming_buffer = new_buffer;
+                
+                if line.len() == 0 {
+                    break;
+                }
+
                 // send the line to the user channel
+                line.pop();     // strip \r
+                line.pop();     // strip \n
+                send_log(&logqueue, &format!("Line: {:?}", line));
                 send_log(&logqueue, &String::from_utf8(line).unwrap_or("".to_string()));
             }
         }
@@ -206,10 +212,9 @@ impl Connection {
                 return (vec![], buf);
             }
 
-            let (line_data, new_buf) = s.split_at(i);
+            let (line_data, new_buf) = s.split_at(i + 2);
             let mut line = line_data.to_vec();
             buf = new_buf.to_vec();
-            buf.drain(..2);
             
             // Process any backspaces
             loop {
