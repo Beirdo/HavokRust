@@ -174,8 +174,8 @@ impl Server {
     }
 
 
-    pub fn get_settings(&mut self) -> Settings {
-        return self.settings.clone().unwrap();
+    pub fn get_settings(&mut self) -> Option<Settings> {
+        return self.settings.clone();
     }
 }
 
@@ -275,7 +275,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                 let mut connection = Connection::new(logqueue, &txsender, addr);
                 connection.start_processing().await;
                 server.connections.insert(addr, connection.clone());
-                connection.send_line(&txsender, format!("Hi! $c020PWelcome$c0007 to $c000b{}", server.get_settings().mud.name)).await;
+                connection.send_line(&txsender, format!("Hi! $c020PWelcome$c0007 to $c000b{}", server.get_settings().unwrap().mud.name)).await;
             },
             v = txreceiver.recv() => {
                 server.send_message(v.unwrap().clone()).await;
