@@ -16,6 +16,7 @@ use server::{Server, do_server_thread};
 use dnslookup::do_dns_lookup_thread;
 use logging::*;
 use std::sync::Arc;
+use std::env;
 
 use crate::ansicolors::AnsiColors;
 
@@ -41,6 +42,12 @@ async fn main() {
 
     let mut settings = Settings::new(&appname, &logtx).unwrap().clone();
     send_log(&logtx, &format!("Settings: {:?}", settings));
+
+    let profile = settings.mud.aws_profile;
+    if profile.len() != 0 {
+        let key = "AWS_PROFILE";
+        env::set_var(key, profile);
+    }
 
     let (ctltx, mut ctlrx) = broadcast::channel::<ControlSignal>(4);
 
