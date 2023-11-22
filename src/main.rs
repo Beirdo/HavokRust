@@ -6,12 +6,14 @@ mod server;
 mod connection;
 mod logging;
 mod ansicolors;
+mod dnslookup;
 
 use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, Barrier};
 use settings::Settings;
 use server::{Server, do_server_thread};
+use dnslookup::do_dns_lookup_thread;
 use logging::*;
 use std::sync::Arc;
 
@@ -42,7 +44,7 @@ async fn main() {
 
     let (ctltx, mut ctlrx) = broadcast::channel::<ControlSignal>(4);
 
-    let thread_count = 4; // no barrier in Ctrl-C handler, but include the main thread
+    let thread_count = 5; // no barrier in Ctrl-C handler, but include the main thread
     let barrier = Arc::new(Barrier::new(thread_count));
     let shutdown_barrier = Arc::new(Barrier::new(thread_count));
 
@@ -118,6 +120,17 @@ async fn main() {
     });
     send_log(&logtx, &format!("Server Thread: {:?}", server_handle));
     task_handle_list.push(server_handle);
+
+    // Start up the DNS Lookup thread
+    let dns_barrier = barrier.clone();
+    let dns_shdn_barrier = shutdown_barrier.clone();
+    let dns_ctltx = ctltx.clone();
+    let dns_logtx = logtx.clone();
+    let dns_handle = tokio::spawn(async move {
+        do_dns_lookup_thread(dns_barrier, dns_shdn_barrier, dns_ctltx, &dns_logtx).await;
+    });
+    send_log(&logtx, &format!("DNS Lookup Thread: {:?}", dns_handle));
+    task_handle_list.push(dns_handle);
 
     // Now wait for all the barriers
     let _ = barrier.wait().await;

@@ -3,6 +3,7 @@ extern crate tokio;
 use crate::server::NetworkMessage;
 use crate::logging::*;
 use crate::ansicolors::AnsiColors;
+use crate::dnslookup::resolve_ip;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use std::collections::HashMap;
@@ -32,10 +33,11 @@ pub struct Connection {
     pub rxsender: Option<mpsc::Sender<NetworkMessage>>,
     pub usertxsender: Option<broadcast::Sender<UserMessage>>,
     pub userrxsender: Option<broadcast::Sender<UserMessage>>,
+    hostnames: Option<Vec<String>>,
 }
 
 impl Connection {
-    pub fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<NetworkMessage>, addr: SocketAddr) -> Self {
+    pub async fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<NetworkMessage>, addr: SocketAddr) -> Self {
         send_log(logqueue, &format!("New connection from {:?}", addr));
 
         let s = Connection {
@@ -50,6 +52,7 @@ impl Connection {
             rxsender: None,
             usertxsender: None,
             userrxsender: None,
+            hostnames: resolve_ip(addr.ip()).await,
         };
 
         return s;

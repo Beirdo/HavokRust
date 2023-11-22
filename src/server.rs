@@ -272,7 +272,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                 });
                 server.rd_handles.insert(addr, Arc::new(RwLock::new(rd_handle)));
 
-                let mut connection = Connection::new(logqueue, &txsender, addr);
+                let mut connection = Connection::new(logqueue, &txsender, addr).await;
                 connection.start_processing().await;
                 server.connections.insert(addr, connection.clone());
                 connection.send_line(&txsender, format!("Hi! $c020PWelcome$c0007 to $c000b{}", server.get_settings().unwrap().mud.name)).await;
