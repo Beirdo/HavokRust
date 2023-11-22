@@ -23,63 +23,85 @@ pub struct NetworkMessage {
     pub data: Vec<u8>,
 }
 
+
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub struct Server {
+    initialized: bool,
     bind_ip: String,
     port: u16,
     wizlocked: bool,
     wizlock_reason: String,
-    aws_profile: String,
     settings: Option<Settings>,
-    logqueue: mpsc::Sender<LogMessage>,
+    logqueue: Option<mpsc::Sender<LogMessage>>,
     pub connections: HashMap<SocketAddr, Connection>,
     pub wr_streams: HashMap<SocketAddr, Arc<RwLock<OwnedWriteHalf>>>,
     pub rd_streams: HashMap<SocketAddr, Arc<RwLock<OwnedReadHalf>>>,
     pub rd_handles: HashMap<SocketAddr, Arc<RwLock<JoinHandle<()>>>>,
 }
 
-impl Server {    
-    fn new(logqueue: &mpsc::Sender<LogMessage>, settings: Option<Settings>) -> Result<Self, ()> {
-        if settings.is_none() {
-            let s = Server {
-                bind_ip: "".to_string(),
-                port: 0,
-                wizlocked: false,
-                wizlock_reason: "".to_string(),
-                aws_profile: "".to_string(),
-                settings: None,
-                logqueue: logqueue.clone(),
-                connections: HashMap::new(),
-                wr_streams: HashMap::new(),
-                rd_streams: HashMap::new(),
-                rd_handles: HashMap::new(),
-            };
-            return Ok(s);
-        }
+use lazy_static::lazy_static;
+lazy_static! {
+    static ref SERVER: Arc<RwLock<Server>> = Arc::new(RwLock::new(Server {
+        initialized: false,
+        bind_ip: "".to_string(),
+        port: 0,
+        wizlocked: false,
+        wizlock_reason: "".to_string(),
+        settings: None,
+        logqueue: None,
+        connections: HashMap::new(),
+        wr_streams: HashMap::new(),
+        rd_streams: HashMap::new(),
+        rd_handles: HashMap::new(),
+    }));
+}
 
-        send_log(logqueue, "Creating new server");
-        let conf = settings.unwrap();
 
-        let s = Server {
-            bind_ip: conf.mud.bind_ip.clone(),
-            port: conf.mud.port,
-            wizlocked: conf.mud.wizlocked,
-            wizlock_reason: conf.mud.wizlock_reason.clone(),
-            aws_profile: conf.mud.aws_profile.clone(),
-            settings: Some(conf.clone()),
-            logqueue: logqueue.clone(),
-            connections: HashMap::new(),
-            wr_streams: HashMap::new(),
-            rd_streams: HashMap::new(),
-            rd_handles: HashMap::new(),
+impl Server {
+    pub async fn get(settings: Option<Settings>) -> Arc<RwLock<Server>> {
+        let initialized = {
+            SERVER.read().await.initialized
         };
 
-        return Ok(s);
+        if !initialized {
+            SERVER.write().await.initialize(settings);
+        }
+        SERVER.clone()
+    }
+
+    pub fn initialize(&mut self, settings: Option<Settings>) {
+        let logging: bool = !self.logqueue.is_none();
+
+        if logging {
+            let logqueue = self.logqueue.as_ref().unwrap().clone();
+            send_log(&logqueue, "Creating new server");
+        }
+
+        if !settings.is_none() {
+            let conf = settings.unwrap();
+
+            self.bind_ip = conf.mud.bind_ip.clone();
+            self.port = conf.mud.port;
+            self.wizlocked = conf.mud.wizlocked;
+            self.wizlock_reason = conf.mud.wizlock_reason.clone();
+            self.settings = Some(conf.clone());
+            self.connections.clear();
+            self.wr_streams.clear();
+            self.rd_streams.clear();
+            self.rd_handles.clear();
+            self.initialized = true;
+        }
+    }
+
+    pub async fn set_logqueue(logqueue: &mpsc::Sender<LogMessage>) {
+        SERVER.write().await.logqueue = Some(logqueue.clone());        
     }
 
     pub fn start_server(&mut self) -> Arc<RwLock<Option<TcpListener>>> {
         let mut listener = None;
+        let logqueue = self.logqueue.as_ref().unwrap().clone();
+
         if !self.settings.is_none() {
             let addr = format!("{}:{}", self.bind_ip, self.port);
             let bind_addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("Bind address {} is invalid: {:?}", addr, e));
@@ -93,7 +115,7 @@ impl Server {
                 panic!("We cannot determine if this is IPv4 or IPv6!: {}", addr);
             }
 
-            send_log(&self.logqueue, &format!("Binding to {}", addr));
+            send_log(&logqueue, &format!("Binding to {}", addr));
             let _ = socket.set_reuseaddr(true);
             let _ = socket.bind(bind_addr);
             listener = Some(socket.listen(1024).unwrap_or_else(|e| panic!("Could not listen on {}: {:?}", addr, e)));
@@ -109,11 +131,12 @@ impl Server {
         let wr_streams = &mut self.wr_streams;
         let rd_streams = &mut self.rd_streams;
         let addr = message.dest.clone();
+        let logqueue = self.logqueue.as_ref().unwrap().clone();
 
         match wr_streams.get_mut(&addr) {
             Some(item) => {
                 if disconnect {
-                    send_log(&self.logqueue, &format!("Disconnecting {:?}", addr));
+                    send_log(&logqueue, &format!("Disconnecting {:?}", addr));
                     shutdown_stream(item).await;
                     let wr_stream = wr_streams.remove(&addr);
                     let rd_stream = rd_streams.remove(&addr);
@@ -121,7 +144,7 @@ impl Server {
                     drop(rd_stream);
                     self.connections.remove(&addr);
                 } else {
-                    send_log(&self.logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
+                    send_log(&logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
                     write_message(item, msgdata).await;
                 }
             },
@@ -133,15 +156,16 @@ impl Server {
         let connections = &mut self.connections;
         let data_len = message.data.len();
         let addr = message.dest.clone();
+        let logqueue = self.logqueue.as_ref().unwrap().clone();
 
-        send_log(&self.logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
+        send_log(&logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
         match connections.get_mut(&addr) {
             Some(item) => {
                 let mut sender = item.rxsender.clone();
                 if !sender.is_none() {
                     let result = sender.as_mut().unwrap().clone().send(message.clone()).await;
                     if result.is_err() {
-                        send_error(&self.logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
+                        send_error(&logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
                     }
                 }
             },
@@ -176,7 +200,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                               logqueue: &mpsc::Sender<LogMessage>) {
     let mut shutdown = false;
     let mut initialized = false;
-    let mut server = Server::new(logqueue, None).unwrap();
+    let mut server = { Server::get(None).await.write().await.clone() };
     let mut listener = server.start_server().clone();
     let mut ctlqueue = ctlsender.subscribe();
 
@@ -195,7 +219,9 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
         match ctlmsg {
             ControlSignal::Shutdown => shutdown = true,
             ControlSignal::Reconfigure(new_settings) => {
-                server = Server::new(logqueue, Some(new_settings)).unwrap();
+                {
+                    server = Server::get(Some(new_settings)).await.write().await.clone();
+                }
                 listener = server.start_server().clone();
                 initialized = true;
             },
@@ -223,7 +249,9 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
 
                             (txsender, txreceiver) = mpsc::channel::<NetworkMessage>(2048);
                             
-                            server = Server::new(logqueue, Some(new_settings)).unwrap();
+                            {
+                                server = Server::get(Some(new_settings)).await.write().await.clone();
+                            }
                             listener = server.start_server().clone();
                         }
                     },

@@ -11,7 +11,7 @@ use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, Barrier};
 use settings::Settings;
-use server::do_server_thread;
+use server::{Server, do_server_thread};
 use logging::*;
 use std::sync::Arc;
 
@@ -35,6 +35,7 @@ async fn main() {
     send_log(&logtx, &format!("Starting {}", appname));
 
     AnsiColors::set_logqueue(&logtx);
+    Server::set_logqueue(&logtx).await;
 
     let mut settings = Settings::new(&appname, &logtx).unwrap().clone();
     send_log(&logtx, &format!("Settings: {:?}", settings));
