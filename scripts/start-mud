@@ -1,0 +1,23 @@
+#! /usr/bin/env bash
+
+export BUILD_MODE=${BUILD_MODE:-testing}
+SCRIPTDIR=$(cd $(dirname $0); pwd)
+
+network=`docker network ls | grep havokmud | tr -s " " | cut -d " " -f 2`
+if [ -z "${network}" ] ; then
+    docker network create havokmud
+fi
+
+LOGDIR=$(cd ${SCRIPTDIR}/../../logs ; pwd)
+chmod 1777 ${LOGDIR}
+
+docker rm havokmud
+screen -d -m -S havokmud
+screen -S havokmud -X screen -t mud
+screen -S havokmud -p mud -X exec docker run -p 3000:3000 \
+	--network havokmud --name havokmud \
+	-v ${LOGDIR}:/var/log/havokmud \
+       	-it havokmud:latest \
+       	scripts/start-in-docker
+screen -S havokmud -p mud -X exec docker attach havokmud
+screen -r -S havokmud

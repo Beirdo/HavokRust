@@ -1,0 +1,32 @@
+#! /usr/bin/env bash
+
+export BUILD_MODE=${BUILD_MODE:-testing}
+SCRIPTDIR=$(cd $(dirname $0); pwd)
+
+network=`docker network ls | grep havokmud | tr -s " " | cut -d " " -f 2`
+if [ -z "${network}" ] ; then
+    docker network create havokmud
+fi
+
+if [ "${BUILD_MODE}" = "testing" ] ; then
+    # Start up localstack
+    container=`docker ps --format '{{.Names}}' | grep localstack-main`
+    if [ "${container}" != "localstack-main" ]; then
+	docker rm localstack_main localstack-main 2>&1 > /dev/null
+	screen -d -m -S localstack
+        screen -S localstack -X screen -t localstack
+        screen -S localstack -p localstack -X exec localstack start
+	
+	echo "Waiting for localstack docker image to start"
+
+	while true; do
+            container=`docker ps --format '{{.Names}}' | grep localstack_main`
+            if [ "${container}" = "localstack_main" ]; then
+                break
+	    fi
+            sleep 2
+	done
+        docker rename localstack_main localstack-main
+        docker network connect havokmud localstack-main
+    fi
+fi

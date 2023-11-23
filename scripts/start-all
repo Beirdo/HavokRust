@@ -1,0 +1,13 @@
+#! /usr/bin/env bash
+
+export BUILD_MODE=${BUILD_MODE:-testing}
+SCRIPTDIR=$(cd $(dirname $0); pwd)
+
+# Start up localstack
+${SCRIPTDIR}/start-localstack
+
+# Start up eosio
+${SCRIPTDIR}/start-eosio
+
+# Start up mud
+${SCRIPTDIR}/start-mud

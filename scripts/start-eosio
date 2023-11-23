@@ -1,0 +1,30 @@
+#! /usr/bin/env bash
+
+export BUILD_MODE=${BUILD_MODE:-testing}
+SCRIPTDIR=$(cd $(dirname $0); pwd)
+BLOCKDIR=$(cd ${SCRIPTDIR}/../../docker/eosio/blockchain ; pwd)
+WALLETDIR=$(cd ${SCRIPTDIR}/../../docker/eosio/wallets ; pwd)
+EOSIODIR=$(cd ${SCRIPTDIR}/../../../../eosio ; pwd)
+
+network=$(docker network ls | grep havokmud | tr -s " " | cut -d " " -f 2)
+if [ -z "${network}" ] ; then
+    docker network create havokmud
+fi
+
+if [ "${BUILD_MODE}" = "testing" ] ; then
+    # Start up eosio
+    container=`docker ps --format '{{.Names}}' | grep eosio`
+    if [ "${container}" != "eosio" ]; then
+        docker rm eosio
+	      screen -d -m -S eosio
+        screen -S eosio -X screen -t eosio
+        screen -S eosio -p eosio -X exec docker run \
+		-p 8000:8000 -p 6666:6666 \
+	        --network havokmud --name eosio \
+	        -v ${EOSIODIR}:/home/eosio/eosio \
+	        -v ${BLOCKDIR}:/home/eosio/basechain/blockchain \
+	        -v ${WALLETDIR}:/home/eosio/basechain/wallets \
+	        -it eosio:latest \
+	        ./start-eosio-in-docker
+    fi
+fi

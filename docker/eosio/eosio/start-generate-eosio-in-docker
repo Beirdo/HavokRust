@@ -1,0 +1,7 @@
+#! /usr/bin/env bash
+
+screen -d -m -e ^Bb -S eosio -s /bin/bash /bin/bash
+screen -S eosio -X screen -t eosio
+screen -S eosio -p eosio -X exec /bin/bash -c bin/generate-eosio.sh
+screen -r -S eosio
+
