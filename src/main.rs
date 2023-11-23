@@ -17,6 +17,7 @@ use dnslookup::do_dns_lookup_thread;
 use logging::*;
 use std::sync::Arc;
 use std::env;
+use std::process;
 
 use crate::ansicolors::AnsiColors;
 
@@ -74,6 +75,10 @@ async fn main() {
     let ctrlc_handle = tokio::spawn(async move {
         signal::ctrl_c().await.unwrap();
         ctrlc_ctltx.send(ControlSignal::Shutdown.clone()).unwrap();
+        let _ = tokio::spawn(async move {
+            signal::ctrl_c().await.unwrap();
+            process::exit(1);
+        });
     });
     send_log(&logtx, &format!("Ctrl-C Thread: {:?}", ctrlc_handle));
     task_handle_list.push(ctrlc_handle);
