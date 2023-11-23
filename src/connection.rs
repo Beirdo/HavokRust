@@ -52,7 +52,7 @@ impl Connection {
             rxsender: None,
             usertxsender: None,
             userrxsender: None,
-            hostnames: resolve_ip(addr.ip()).await,
+            hostnames: None,
         };
 
         return s;
@@ -83,6 +83,14 @@ impl Connection {
             txconnection.do_tx_process_thread(&txlogqueue, txsender.clone(), usertxsender.clone()).await; 
         });
         self.tx_process_handle = Arc::new(RwLock::new(Some(txhandle)));
+
+        let ip_addr = self.addr.ip().clone();
+        let dnshandle  = tokio::spawn(async move {
+            resolve_ip(ip_addr).await
+        });
+        let dnsresult = dnshandle.await;
+        self.hostnames = dnsresult.unwrap_or(None);
+        send_log(&self.logqueue, &format!("DNS for {:?}: {:?}", ip_addr, self.hostnames));
     }
 
 
