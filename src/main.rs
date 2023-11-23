@@ -52,8 +52,8 @@ async fn main() {
 
     let (ctltx, mut ctlrx) = broadcast::channel::<ControlSignal>(4);
 
-    let thread_count = 5; // no barrier in Ctrl-C handler, but include the main thread
-    let barrier = Arc::new(Barrier::new(thread_count));
+    let thread_count = 6; // no barrier in Ctrl-C handler, but include the main thread
+    let barrier = Arc::new(Barrier::new(thread_count - 1));
     let shutdown_barrier = Arc::new(Barrier::new(thread_count));
 
     let mut task_handle_list = vec![]; 
@@ -163,6 +163,16 @@ async fn main() {
             },
         }
     } 
+
+    // Account for any finished threads
+    for handle in &task_handle_list {
+        if handle.is_finished() {
+            info!("Already finished {:?}", handle);
+            let local_barrier = shutdown_barrier.clone();
+            let _ = local_barrier.wait().await;
+        }
+    }
+
 
     let _ = shutdown_barrier.wait().await;
 
