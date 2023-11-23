@@ -67,11 +67,10 @@ pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<B
                 send_log(&logqueue, &format!("Received DNS request for {:?}", item.addr));
                 let query_logqueue = logqueue.clone();
                 let query_resolver = resolver.clone();
+                let query_sender = response_sender.clone();
                 let handle = tokio::spawn(async move {
-                    reverse_lookup(&query_logqueue, query_resolver, item.addr).await
+                    reverse_lookup(&query_logqueue, query_resolver, query_sender, item.addr).await
                 });
-                item = handle.await.unwrap();
-                let _ = request_sender.send(item);
             },
         }
     }
@@ -80,7 +79,7 @@ pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<B
     let _ = shutdown_barrier.wait().await;
 }
 
-async fn reverse_lookup(logqueue: &mpsc::Sender<LogMessage>, resolver: Arc<TokioAsyncResolver>, addr: IpAddr) -> DnsItem {
+async fn reverse_lookup(logqueue: &mpsc::Sender<LogMessage>, resolver: Arc<TokioAsyncResolver>, response_sender: broadcast::Sender<DnsItem>, addr: IpAddr) {
     let response = resolver.reverse_lookup(addr).await;
     let mut names = None;
     if response.is_err() {
@@ -95,10 +94,11 @@ async fn reverse_lookup(logqueue: &mpsc::Sender<LogMessage>, resolver: Arc<Tokio
         }
     }
 
-    DnsItem {
+    let item = DnsItem {
         addr: addr,
         names: names,
-    }
+    };
+    let _ = response_sender.send(item);
 }
 
 #[allow(unused)]
