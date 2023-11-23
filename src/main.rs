@@ -44,7 +44,7 @@ async fn main() {
     let mut settings = Settings::new(&appname, &logtx).unwrap().clone();
     send_log(&logtx, &format!("Settings: {:?}", settings));
 
-    let profile = settings.mud.aws_profile;
+    let profile = settings.mud.aws_profile.clone();
     if profile.len() != 0 {
         let key = "AWS_PROFILE";
         env::set_var(key, profile);

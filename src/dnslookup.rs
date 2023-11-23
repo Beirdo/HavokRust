@@ -2,7 +2,7 @@ extern crate tokio;
 
 use std::net::*;
 use tokio::sync::{broadcast, mpsc, Barrier, Mutex};
-use hickory_resolver::Resolver;
+use hickory_resolver::TokioAsyncResolver;
 use hickory_resolver::config::*;
 use crate::logging::*;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<B
         channels.response_sender = Some(response_sender.clone());
     }
 
-    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).unwrap();
+    let resolver = Arc::new(TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
     let _ = barrier.wait().await;
 
@@ -65,20 +65,12 @@ pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<B
             v = request_receiver.recv() => {
                 let mut item = v.unwrap().clone();
                 send_log(&logqueue, &format!("Received DNS request for {:?}", item.addr));
-                let response = resolver.reverse_lookup(item.addr);
-                if response.is_err() {
-                    item.names = None;
-                    send_error(&logqueue, &format!("DNS error looking up {:?}: {:?}", item.addr, response.err().unwrap()));
-                } else {
-                    let names: Vec<String> = response.unwrap().iter().map(|r| r.to_ascii()).collect();
-                    if names.len() == 0 {
-                        item.names = None;
-                        send_log(&logqueue, &format!("No DNS results for {:?}", item.addr));
-                    } else {
-                        item.names = Some(names.clone());
-                        send_log(&logqueue, &format!("Found DNS for {:?}: {:?}", item.addr, names));
-                    }
-                }
+                let query_logqueue = logqueue.clone();
+                let query_resolver = resolver.clone();
+                let handle = tokio::spawn(async move {
+                    reverse_lookup(&query_logqueue, query_resolver, item.addr).await
+                });
+                item = handle.await.unwrap();
                 let _ = request_sender.send(item);
             },
         }
@@ -86,6 +78,27 @@ pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<B
 
     send_log(&logqueue, "Shutting down DNS Lookup Thread");
     let _ = shutdown_barrier.wait().await;
+}
+
+async fn reverse_lookup(logqueue: &mpsc::Sender<LogMessage>, resolver: Arc<TokioAsyncResolver>, addr: IpAddr) -> DnsItem {
+    let response = resolver.reverse_lookup(addr).await;
+    let mut names = None;
+    if response.is_err() {
+        send_error(&logqueue, &format!("DNS error looking up {:?}: {:?}", addr, response.err().unwrap()));
+    } else {
+        let results: Vec<String> = response.unwrap().iter().map(|r| r.to_ascii()).collect();
+        if results.len() == 0 {
+            send_log(&logqueue, &format!("No DNS results for {:?}", addr));
+        } else {
+            names = Some(results.clone());
+            send_log(&logqueue, &format!("Found DNS for {:?}: {:?}", addr, names));
+        }
+    }
+
+    DnsItem {
+        addr: addr,
+        names: names,
+    }
 }
 
 #[allow(unused)]
