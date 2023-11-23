@@ -72,7 +72,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn new(appname: &str, logqueue: &mpsc::Sender<LogMessage>) -> Result<Self, ConfigError> {
-        send_log(&logqueue, &format!("Loading settings for {}", appname));
+        log_info(&logqueue, &format!("Loading settings for {}", appname));
 
         let run_mode = env::var("HAVOK_RUN_MODE").unwrap_or_else(|_| "development".into());
 
@@ -93,14 +93,14 @@ impl Settings {
         let log_file = String::from(Path::new(&data_dir).join(format!("{}.log", appname)).to_str().unwrap());
 
         if !Path::new(&config_dir).is_dir() {
-            send_log(&logqueue, &format!("Dir does not exist: {}", config_dir));
+            log_info(&logqueue, &format!("Dir does not exist: {}", config_dir));
             fs::create_dir_all(&config_dir).unwrap_or_else(|e| {
                 panic!("Problem creating directory {}: {:?}", config_dir, e);
             })
         }
 
         if !Path::new(&data_dir).is_dir() {
-            send_log(&logqueue, &format!("Dir does not exist: {}", data_dir));
+            log_info(&logqueue, &format!("Dir does not exist: {}", data_dir));
             fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
                 panic!("Problem creating directory {}: {:?}", data_dir, e);
             })

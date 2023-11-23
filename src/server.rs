@@ -75,7 +75,7 @@ impl Server {
 
         if logging {
             let logqueue = self.logqueue.as_ref().unwrap().clone();
-            send_log(&logqueue, "Creating new server");
+            log_info(&logqueue, "Creating new server");
         }
 
         if !settings.is_none() {
@@ -115,7 +115,7 @@ impl Server {
                 panic!("We cannot determine if this is IPv4 or IPv6!: {}", addr);
             }
 
-            send_log(&logqueue, &format!("Binding to {}", addr));
+            log_info(&logqueue, &format!("Binding to {}", addr));
             let _ = socket.set_reuseaddr(true);
             let _ = socket.bind(bind_addr);
             listener = Some(socket.listen(1024).unwrap_or_else(|e| panic!("Could not listen on {}: {:?}", addr, e)));
@@ -136,7 +136,7 @@ impl Server {
         match wr_streams.get_mut(&addr) {
             Some(item) => {
                 if disconnect {
-                    send_log(&logqueue, &format!("Disconnecting {:?}", addr));
+                    log_info(&logqueue, &format!("Disconnecting {:?}", addr));
                     shutdown_stream(item).await;
                     let wr_stream = wr_streams.remove(&addr);
                     let rd_stream = rd_streams.remove(&addr);
@@ -144,7 +144,7 @@ impl Server {
                     drop(rd_stream);
                     self.connections.remove(&addr);
                 } else {
-                    send_log(&logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
+                    log_info(&logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
                     write_message(item, msgdata).await;
                 }
             },
@@ -158,14 +158,14 @@ impl Server {
         let addr = message.dest.clone();
         let logqueue = self.logqueue.as_ref().unwrap().clone();
 
-        send_log(&logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
+        log_info(&logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
         match connections.get_mut(&addr) {
             Some(item) => {
                 let mut sender = item.rxsender.clone();
                 if !sender.is_none() {
                     let result = sender.as_mut().unwrap().clone().send(message.clone()).await;
                     if result.is_err() {
-                        send_error(&logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
+                        log_error(&logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
                     }
                 }
             },
@@ -204,7 +204,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
     let mut listener = server.start_server().clone();
     let mut ctlqueue = ctlsender.subscribe();
 
-    send_log(logqueue, "Starting server thread");
+    log_info(logqueue, "Starting server thread");
 
     let _ = barrier.wait().await;
 
@@ -234,7 +234,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                 match v.unwrap() {
                     ControlSignal::Shutdown => shutdown = true,
                     ControlSignal::Reconfigure(new_settings) => {
-                        send_log(logqueue, "Reconfiguring server thread");
+                        log_info(logqueue, "Reconfiguring server thread");
                         if  new_settings.mud.bind_ip != server.bind_ip || new_settings.mud.port != server.port {
                             for (_, mut connection) in server.connections.drain() {
                                 connection.disconnect(format!("Server shutting down")).await;
@@ -286,10 +286,10 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
         }
     }
 
-    send_log(logqueue, "Closing open connections");
+    log_info(logqueue, "Closing open connections");
 
     for (addr, mut connection) in server.connections.clone() {
-        send_log(logqueue, &format!("Closing connection from {:?}", addr));
+        log_info(logqueue, &format!("Closing connection from {:?}", addr));
         connection.disconnect("Server shutting down".to_string()).await;
     }
 
@@ -308,7 +308,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
         };
     }
 
-    send_log(logqueue, "Shutting down server thread");
+    log_info(logqueue, "Shutting down server thread");
     let _ = shutdown_barrier.wait().await;
 }
 
@@ -339,7 +339,7 @@ async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logque
             v = rd_stream.read_buf(&mut buffer) => {
                 if v.is_err() {
                     let err = v.err();
-                    send_log(&logqueue, &format!("Error on read from {:?}: {:?}", addr, err));
+                    log_info(&logqueue, &format!("Error on read from {:?}: {:?}", addr, err));
                     shutdown = true;
                 } else {
                     let bytes_read = v.unwrap();

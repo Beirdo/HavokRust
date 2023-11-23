@@ -36,13 +36,13 @@ async fn main() {
     
     let (logtx, logrx) = mpsc::channel::<LogMessage>(256);
 
-    send_log(&logtx, &format!("Starting {}", appname));
+    log_info(&logtx, &format!("Starting {}", appname));
 
     AnsiColors::set_logqueue(&logtx);
     Server::set_logqueue(&logtx).await;
 
     let mut settings = Settings::new(&appname, &logtx).unwrap().clone();
-    send_log(&logtx, &format!("Settings: {:?}", settings));
+    log_info(&logtx, &format!("Settings: {:?}", settings));
 
     let profile = settings.mud.aws_profile.clone();
     if profile.len() != 0 {
@@ -66,11 +66,11 @@ async fn main() {
     let log_handle = tokio::spawn(async move {
          do_log_thread(log_barrier, log_shdn_barrier, log_ctlrx, &log_logtx, logrx).await; 
     });
-    send_log(&logtx, &format!("Log Thread: {:?}", log_handle));
+    log_info(&logtx, &format!("Log Thread: {:?}", log_handle));
     task_handle_list.push(log_handle);
     
     // Start Ctrl-C handler thread
-    send_log(&logtx, "Starting Ctrl-C Handler thread");
+    log_info(&logtx, "Starting Ctrl-C Handler thread");
     let ctrlc_ctltx = ctltx.clone();
     let ctrlc_handle = tokio::spawn(async move {
         signal::ctrl_c().await.unwrap();
@@ -80,7 +80,7 @@ async fn main() {
             process::exit(1);
         });
     });
-    send_log(&logtx, &format!("Ctrl-C Thread: {:?}", ctrlc_handle));
+    log_info(&logtx, &format!("Ctrl-C Thread: {:?}", ctrlc_handle));
     task_handle_list.push(ctrlc_handle);
 
     // Start SIGHUP handler thread
@@ -90,7 +90,7 @@ async fn main() {
     let mut sighup_ctlrx = ctltx.subscribe();
     let sighup_logtx = logtx.clone();
     let sighup_handle = tokio::spawn(async move {
-        send_log(&sighup_logtx, "Starting SIGHUP Handler thread");
+        log_info(&sighup_logtx, "Starting SIGHUP Handler thread");
     
         let _ = sighup_barrier.wait().await;
 
@@ -108,7 +108,7 @@ async fn main() {
                     };
                 }, 
                 _ = stream.recv() => {
-                    send_log(&sighup_logtx, "Recieved SIGHUP, reloading config");
+                    log_info(&sighup_logtx, "Recieved SIGHUP, reloading config");
                     let new_settings = Settings::new(&appname, &sighup_logtx).unwrap().clone();
                     let ctrlsignal = ControlSignal::Reconfigure(new_settings.clone());
                     sighup_ctltx.send(ctrlsignal.clone()).unwrap_or_else(|e| panic!("Error: {:?}", e));
@@ -116,10 +116,10 @@ async fn main() {
             }
         }
     
-        send_log(&sighup_logtx, "Shutting down SIGHUP Handler thread");
+        log_info(&sighup_logtx, "Shutting down SIGHUP Handler thread");
         let _ = sighup_shdn_barrier.wait().await;
     });
-    send_log(&logtx, &format!("SIGHUP Thread: {:?}", sighup_handle));
+    log_info(&logtx, &format!("SIGHUP Thread: {:?}", sighup_handle));
     task_handle_list.push(sighup_handle);
 
     // Now we need to start the server thread
@@ -130,7 +130,7 @@ async fn main() {
     let server_handle = tokio::spawn(async move {
         do_server_thread(server_barrier, server_shdn_barrier, server_ctltx, &server_logtx).await;
     });
-    send_log(&logtx, &format!("Server Thread: {:?}", server_handle));
+    log_info(&logtx, &format!("Server Thread: {:?}", server_handle));
     task_handle_list.push(server_handle);
 
     // Start up the DNS Lookup thread
@@ -141,7 +141,7 @@ async fn main() {
     let dns_handle = tokio::spawn(async move {
         do_dns_lookup_thread(dns_barrier, dns_shdn_barrier, dns_ctltx, &dns_logtx).await;
     });
-    send_log(&logtx, &format!("DNS Lookup Thread: {:?}", dns_handle));
+    log_info(&logtx, &format!("DNS Lookup Thread: {:?}", dns_handle));
     task_handle_list.push(dns_handle);
 
     // Now wait for all the barriers
@@ -159,7 +159,7 @@ async fn main() {
             },
             ControlSignal::Reconfigure(new_settings) => {
                 settings = new_settings.clone();
-                send_log(&logtx, &format!("New Settings: {:?}", settings));
+                log_info(&logtx, &format!("New Settings: {:?}", settings));
             },
         }
     } 

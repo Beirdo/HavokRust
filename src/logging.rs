@@ -22,22 +22,22 @@ fn create_log_message(log_level: log::Level, msg: &str) -> LogMessage {
 }
 
 #[allow(unused)]
-pub fn send_log(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
-    logqueue.try_send(create_log_message(Level::Info, message)).unwrap();
-}
-
-#[allow(unused)]
-pub fn send_debug(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
+pub fn log_debug(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
     logqueue.try_send(create_log_message(Level::Debug, message)).unwrap();
 }
 
 #[allow(unused)]
-pub fn send_warn(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
+pub fn log_info(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
+    logqueue.try_send(create_log_message(Level::Info, message)).unwrap();
+}
+
+#[allow(unused)]
+pub fn log_warn(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
     logqueue.try_send(create_log_message(Level::Warn, message)).unwrap();
 }
 
 #[allow(unused)]
-pub fn send_error(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
+pub fn log_error(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
     logqueue.try_send(create_log_message(Level::Error, message)).unwrap();
 }
 
@@ -82,7 +82,7 @@ pub async fn do_log_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>
     let mut draining = false;
     let mut drained = false;
 
-    send_log(&logtxqueue, "Starting logging thread");
+    log_info(&logtxqueue, "Starting logging thread");
 
     let _ = barrier.wait().await;
 
@@ -102,7 +102,7 @@ pub async fn do_log_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>
                 logqueue.close();
         },
             ControlSignal::Reconfigure(new_settings) => {
-                send_log(logtxqueue, "Configuring logging thread");
+                log_info(logtxqueue, "Configuring logging thread");
                 settings = new_settings.clone();
                 init_logging(settings);
                 initialized = true;
@@ -155,7 +155,7 @@ pub async fn do_log_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>
                     logqueue.close();
                 },
                 ControlSignal::Reconfigure(new_settings) => {
-                    send_log(logtxqueue, "Reconfiguring logging thread");
+                    log_info(logtxqueue, "Reconfiguring logging thread");
                     settings = new_settings.clone();
                     init_logging(settings);
                 },

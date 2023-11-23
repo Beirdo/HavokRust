@@ -38,7 +38,7 @@ pub struct Connection {
 
 impl Connection {
     pub async fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<NetworkMessage>, addr: SocketAddr) -> Self {
-        send_log(logqueue, &format!("New connection from {:?}", addr));
+        log_info(logqueue, &format!("New connection from {:?}", addr));
 
         let s = Connection {
             txqueue: txsender.clone(),
@@ -90,13 +90,13 @@ impl Connection {
         });
         let dnsresult = dnshandle.await;
         self.hostnames = dnsresult.unwrap_or(None);
-        send_log(&self.logqueue, &format!("DNS for {:?}: {:?}", ip_addr, self.hostnames));
+        log_info(&self.logqueue, &format!("DNS for {:?}: {:?}", ip_addr, self.hostnames));
     }
 
 
     async fn do_tx_process_thread(&mut self, logqueue: &mpsc::Sender<LogMessage>, txsender: mpsc::Sender<NetworkMessage>,
                                   usertxsender: broadcast::Sender<UserMessage>) {
-        send_log(&logqueue, &format!("Starting Tx Process Thread for {:?}", self.addr));
+        log_info(&logqueue, &format!("Starting Tx Process Thread for {:?}", self.addr));
         let mut usertxreceiver = usertxsender.subscribe();
 
         loop {
@@ -116,7 +116,7 @@ impl Connection {
             }
         }
 
-        send_log(&logqueue, &format!("Shutting down Tx Process Thread for {:?}", self.addr));
+        log_info(&logqueue, &format!("Shutting down Tx Process Thread for {:?}", self.addr));
     }
 
     fn jinja_process(&mut self, mut jinjamap: HashMap<String, String>) -> String {
@@ -137,7 +137,7 @@ impl Connection {
                                userrxsender: broadcast::Sender<UserMessage>) {
         let mut incoming_buffer: Vec<u8> = Vec::new();
 
-        send_log(&logqueue, &format!("Starting Rx Process Thread for {:?}", self.addr));
+        log_info(&logqueue, &format!("Starting Rx Process Thread for {:?}", self.addr));
 
         while let Some(msg) = rxreceiver.recv().await {
             if msg.data.len() == 0 {
@@ -145,10 +145,10 @@ impl Connection {
                 break;
             }
 
-            send_log(&logqueue, &format!("Received {} bytes from {:?}", msg.data.len(), self.addr));
-            send_log(&logqueue, &format!("Data: {:?}", msg.data));
+            log_info(&logqueue, &format!("Received {} bytes from {:?}", msg.data.len(), self.addr));
+            log_info(&logqueue, &format!("Data: {:?}", msg.data));
             let mut data = self.handle_telnet_commands(msg.data);
-            send_log(&logqueue, &format!("After telnet Data: {:?}", data));
+            log_info(&logqueue, &format!("After telnet Data: {:?}", data));
             incoming_buffer.append(&mut data);
 
             loop {
@@ -162,10 +162,10 @@ impl Connection {
                 // send the line to the user channel
                 linebuf.pop();     // strip \r
                 linebuf.pop();     // strip \n
-                send_log(&logqueue, &format!("Line Buffer: {:?}", linebuf));
+                log_info(&logqueue, &format!("Line Buffer: {:?}", linebuf));
 
                 let line: String = String::from_utf8_lossy(&linebuf).to_string();
-                send_log(&logqueue, &line);
+                log_info(&logqueue, &line);
 
                 let usermsg = UserMessage {
                     bytes: linebuf.clone(),
@@ -175,7 +175,7 @@ impl Connection {
                 let _ = userrxsender.send(usermsg);
             }
         }
-        send_log(&logqueue, &format!("Shutting down Rx Process Thread for {:?}", self.addr));
+        log_info(&logqueue, &format!("Shutting down Rx Process Thread for {:?}", self.addr));
     }
 
     pub async fn disconnect(&mut self, reason: String) {
