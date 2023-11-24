@@ -33,9 +33,9 @@ lazy_static! {
 }
 
 #[allow(unused)]
-pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>,
-                                  logqueue: &mpsc::Sender<LogMessage>) {
-    log_info(&logqueue, "Starting DNS Lookup Thread");
+pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>,
+                                  ctlsender: broadcast::Sender<ControlSignal>) {
+    log_info("Starting DNS Lookup Thread");
 
     let mut shutdown = false;
     let mut ctlqueue = ctlsender.subscribe();
@@ -64,33 +64,32 @@ pub async fn do_dns_lookup_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<B
             }, 
             v = request_receiver.recv() => {
                 let mut item = v.unwrap().clone();
-                log_info(&logqueue, &format!("Received DNS request for {:?}", item.addr));
-                let query_logqueue = logqueue.clone();
+                log_info(&format!("Received DNS request for {:?}", item.addr));
                 let query_resolver = resolver.clone();
                 let query_sender = response_sender.clone();
                 let handle = tokio::spawn(async move {
-                    reverse_lookup(&query_logqueue, query_resolver, query_sender, item.addr).await
+                    reverse_lookup(query_resolver, query_sender, item.addr).await
                 });
             },
         }
     }
 
-    log_info(&logqueue, "Shutting down DNS Lookup Thread");
+    log_info("Shutting down DNS Lookup Thread");
     let _ = shutdown_barrier.wait().await;
 }
 
-async fn reverse_lookup(logqueue: &mpsc::Sender<LogMessage>, resolver: Arc<TokioAsyncResolver>, response_sender: broadcast::Sender<DnsItem>, addr: IpAddr) {
+async fn reverse_lookup(resolver: Arc<TokioAsyncResolver>, response_sender: broadcast::Sender<DnsItem>, addr: IpAddr) {
     let response = resolver.reverse_lookup(addr).await;
     let mut names = None;
     if response.is_err() {
-        log_error(&logqueue, &format!("DNS error looking up {:?}: {:?}", addr, response.err().unwrap()));
+        log_error(&format!("DNS error looking up {:?}: {:?}", addr, response.err().unwrap()));
     } else {
         let results: Vec<String> = response.unwrap().iter().map(|r| r.to_ascii()).collect();
         if results.len() == 0 {
-            log_info(&logqueue, &format!("No DNS results for {:?}", addr));
+            log_info(&format!("No DNS results for {:?}", addr));
         } else {
             names = Some(results.clone());
-            log_info(&logqueue, &format!("Found DNS for {:?}: {:?}", addr, names));
+            log_info(&format!("Found DNS for {:?}: {:?}", addr, names));
         }
     }
 

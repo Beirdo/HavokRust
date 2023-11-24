@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use ansi_term::{Style, Color};
 use fancy_regex::{Regex, RegexBuilder};
-use tokio::sync::mpsc;
 use lazy_static::lazy_static;
 use std::sync::{Arc, RwLock};
 
@@ -67,7 +66,6 @@ pub struct AnsiColors {
     bg_color_map: HashMap<u32, Color>,
     style_map: HashMap<u32, Styles>,
     regex: Regex,
-    logqueue: Option<mpsc::Sender<LogMessage>>,
 }
 
 lazy_static! {
@@ -78,7 +76,6 @@ lazy_static! {
         bg_color_map: HashMap::new(),
         style_map: HashMap::new(),
         regex: Regex::new("").unwrap(),
-        logqueue: None,
     }));
 }
 
@@ -92,10 +89,6 @@ impl AnsiColors {
             ANSI_PARSER.write().unwrap().initialize();
         }
         ANSI_PARSER.clone()
-    }
-
-    pub fn set_logqueue(logqueue: &mpsc::Sender<LogMessage>) {
-        ANSI_PARSER.write().unwrap().logqueue = Some(logqueue.clone());        
     }
 
     fn initialize(&mut self) {
@@ -163,8 +156,7 @@ impl AnsiColors {
     }
 
     pub fn convert_string(& self, message: String, ansi_mode: bool) -> Vec<u8> {
-        let logqueue = self.logqueue.clone().unwrap();
-        log_debug(&logqueue, &format!("Message: \"{}\", ANSI mode: {}", message, ansi_mode));
+        log_debug(&format!("Message: \"{}\", ANSI mode: {}", message, ansi_mode));
         let mut parts = vec![];
         let capt_iter = self.regex.captures_iter(&message);
         for capture in capt_iter {
@@ -190,7 +182,7 @@ impl AnsiColors {
             parts.push(part);
         }
 
-        log_debug(&logqueue, &format!("Parts: {:?}", parts));
+        log_debug(&format!("Parts: {:?}", parts));
 
         let mut new_parts = vec![];
         for part in parts {
@@ -210,7 +202,7 @@ impl AnsiColors {
 
         parts = new_parts.clone();
 
-        log_debug(&logqueue, &format!("New Parts: {:?}", parts));
+        log_debug(&format!("New Parts: {:?}", parts));
 
         let mut output: Vec<u8> = vec![];
         let mut have_old_color_params = false;
@@ -221,7 +213,7 @@ impl AnsiColors {
             if ansi_mode {
                 let new_color_params = self.convert_code(part.code).clone();
                 color_params = new_color_params.clone();
-                log_debug(&logqueue, &format!("Color params: {:?}", color_params));
+                log_debug(&format!("Color params: {:?}", color_params));
             }
 
             if !ansi_mode || (have_old_color_params && color_params == old_color_params) {
@@ -246,7 +238,7 @@ impl AnsiColors {
                     .on(params.bg)
                     .fg(params.fg);
 
-                log_debug(&logqueue, &format!("Style: {:?}", style));
+                log_debug(&format!("Style: {:?}", style));
                 let ansi_string: String = format!("{}", style.paint(part.text));
                 output.append(&mut ansi_string.into_bytes());
             }

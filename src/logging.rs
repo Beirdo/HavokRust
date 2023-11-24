@@ -2,9 +2,8 @@ extern crate tokio;
 
 use simplelog::*;
 use std::fs::OpenOptions;
-use tokio::sync::{broadcast, mpsc, Barrier};
+use tokio::sync::{broadcast, mpsc, Barrier, RwLock};
 use std::sync::Arc;
-use crate::settings::Settings;
 use crate::ControlSignal;
 
 
@@ -21,45 +20,73 @@ fn create_log_message(log_level: log::Level, msg: &str) -> LogMessage {
     }
 }
 
+
+#[derive(Clone)]
 #[allow(unused)]
-pub fn log_debug(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
-    logqueue.try_send(create_log_message(Level::Debug, message)).unwrap();
+pub struct Logging {
+    initialized: bool,
+    logtx: Option<mpsc::Sender<LogMessage>>,
+    level: Level,
+    logfile: Option<String>,
 }
 
-#[allow(unused)]
-pub fn log_info(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
-    logqueue.try_send(create_log_message(Level::Info, message)).unwrap();
+use lazy_static::lazy_static;
+lazy_static! {
+    static ref LOGGER: Arc<RwLock<Logging>> = Arc::new(RwLock::new(Logging {
+        initialized: false,
+        logtx: None,
+        level: Level::Info,
+        logfile: None,
+    }));
 }
 
-#[allow(unused)]
-pub fn log_warn(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
-    logqueue.try_send(create_log_message(Level::Warn, message)).unwrap();
-}
+impl Logging {
+    pub async fn set_logqueue(logtx: &mpsc::Sender<LogMessage>) {
+        let mut logger = LOGGER.write().await;
 
-#[allow(unused)]
-pub fn log_error(logqueue: &mpsc::Sender<LogMessage>, message: &str) {
-    logqueue.try_send(create_log_message(Level::Error, message)).unwrap();
-}
+        logger.logtx = Some(logtx.clone());
+    }
 
-// TODO: make this actually work for reconfiguration
-pub fn init_logging(settings: Settings) {
-    let log_file = String::clone(&settings.global.log_file);
+    pub async fn set_debug(debug: bool) {
+        let mut logger = LOGGER.write().await;
 
-    CombinedLogger::init(vec![
-        TermLogger::new(
-            LevelFilter::Info,
+        if debug {
+            logger.level = Level::Debug;
+        } else {
+            logger.level = Level::Info;
+        }
+    }
+
+    pub async fn set_logfile(logfile: String) {
+        let mut logger = LOGGER.write().await;
+        logger.logfile = Some(logfile.clone());
+        logger.initialize();
+    }
+
+    fn initialize(&mut self) {
+        self.level = Level::Info;
+
+        if self.initialized {
+            return;
+        }
+
+        let console_logger = TermLogger::new(
+            LevelFilter::Debug,
             ConfigBuilder::new()
-                .set_thread_level(LevelFilter::Debug)
-                .set_target_level(LevelFilter::Debug)
-                .set_location_level(LevelFilter::Debug)
+                .set_time_format_custom(format_description!("[hour]:[minute]:[second].[subsecond]"))
+                .set_thread_level(LevelFilter::Trace)
+                .set_target_level(LevelFilter::Trace)
+                .set_location_level(LevelFilter::Trace)
                 .set_thread_mode(ThreadLogMode::Both)
                 .build(),
             TerminalMode::Mixed,
             ColorChoice::Auto,
-        ),
-        WriteLogger::new(
-            LevelFilter::Info,
+        );
+
+        let file_logger = WriteLogger::new(
+            LevelFilter::Debug,
             ConfigBuilder::new()
+                .set_time_format_custom(format_description!("[hour]:[minute]:[second].[subsecond]"))
                 .set_thread_level(LevelFilter::Debug)
                 .set_target_level(LevelFilter::Debug)
                 .set_location_level(LevelFilter::Debug)
@@ -68,104 +95,172 @@ pub fn init_logging(settings: Settings) {
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(log_file)
+                .open(self.logfile.as_ref().unwrap().clone())
                 .unwrap(),
-        )
-    ]).unwrap_or_else(|_| {});
+        );
 
-}
+        CombinedLogger::init(vec![
+            console_logger,
+            file_logger,
+        ]).unwrap_or_else(|_| {});
 
-pub async fn do_log_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, mut ctlqueue: broadcast::Receiver<ControlSignal>, 
-                           logtxqueue: &mpsc::Sender<LogMessage>, mut logqueue: mpsc::Receiver<LogMessage>) {
-    let mut shutdown = false;
-    let mut initialized = false;
-    let mut draining = false;
-    let mut drained = false;
+        self.initialized = true;
+    }
+    
+    pub async fn log_thread(& self, barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, ctltx: broadcast::Sender<ControlSignal>, 
+                            mut logrx: mpsc::Receiver<LogMessage>) {
+        let mut shutdown = false;
+        let mut draining = false;
+        let mut drained = false;
+        let mut ctlqueue = ctltx.subscribe();
 
-    log_info(&logtxqueue, "Starting logging thread");
+        self.log_info("Starting logging thread".to_string());
 
-    let _ = barrier.wait().await;
+        let _ = barrier.wait().await;
 
-    let mut settings: Settings;
-    while !initialized {
-        let ctlmsg = ctlqueue.recv().await.unwrap();
-        match ctlmsg {
-            ControlSignal::Shutdown => {
-                shutdown = true;
-                draining = true;
-                drained = false;
+        while (!shutdown || draining) && !drained {
+            let mut a = None;
+            let mut b = None;
 
-                // Allow all other tasks to log dying gasps.
-                shutdown_barrier.wait().await;
+            while a.is_none() && b.is_none() && !drained {
+                tokio::select! {
+                    v = logrx.recv() => {
+                        if v.is_none() {
+                            draining = false;
+                            drained = true;
+                            info!("Logs drained.");
+                        } else {
+                            a = Some(v.unwrap());
+                        }
+                    }, 
+                    v = ctlqueue.recv() => b = Some(v.unwrap()),
+                }
+            }
+            
+            if !a.is_none() {
+                let log_message = a.unwrap();
+                let message = log_message.message.to_owned();
+                if log_enabled!(log_message.level) && log_message.level <= self.level {
+                    log!(log_message.level, "{}", message);
+                }
+            }
 
-                info!("Draining logs");
-                logqueue.close();
-        },
-            ControlSignal::Reconfigure(new_settings) => {
-                log_info(logtxqueue, "Configuring logging thread");
-                settings = new_settings.clone();
-                init_logging(settings);
-                initialized = true;
-            },
+            if !b.is_none() {
+                match b.unwrap() {
+                    ControlSignal::Shutdown => {
+                        shutdown = true;
+                        draining = true;
+                        drained = false;
+
+                        // Allow all other tasks to log dying gasps.
+                        shutdown_barrier.wait().await;
+
+                        info!("Draining logs");
+                        logrx.close();
+                    },
+                    ControlSignal::Reconfigure(_) => {},
+                }
+            }
+        }
+
+        drop(logrx);
+        drop(ctlqueue);
+
+        info!("Shutting down Logging thread");
+    }
+
+    #[allow(unused)]
+    pub fn log_trace(& self, message: String) {
+        if !self.logtx.is_none() {
+            let logtx = self.logtx.as_ref().unwrap().clone();
+            logtx.try_send(create_log_message(Level::Trace, &message)).unwrap();
         }
     }
 
-    while (!shutdown || draining) && !drained {
-        let mut a = None;
-        let mut b = None;
-
-        while a.is_none() && b.is_none() && !drained {
-            tokio::select! {
-                v = logqueue.recv() => {
-                    if v.is_none() {
-                        draining = false;
-                        drained = true;
-                        info!("Logs drained.");
-                    } else {
-                        a = Some(v.unwrap());
-                    }
-                }, 
-                v = ctlqueue.recv() => b = Some(v.unwrap()),
-            }
-        }
-        
-        if !a.is_none() {
-            let log_message = a.unwrap();
-            let message = log_message.message.to_owned();
-            match log_message.level {
-                Level::Trace => trace!("{}", message),
-                Level::Debug => debug!("{}", message),
-                Level::Info  => info!("{}", message),
-                Level::Warn  => warn!("{}", message),
-                Level::Error => error!("{}", message),
-            };
-        }
-
-        if !b.is_none() {
-            match b.unwrap() {
-                ControlSignal::Shutdown => {
-                    shutdown = true;
-                    draining = true;
-                    drained = false;
-
-                    // Allow all other tasks to log dying gasps.
-                    shutdown_barrier.wait().await;
-
-                    info!("Draining logs");
-                    logqueue.close();
-                },
-                ControlSignal::Reconfigure(new_settings) => {
-                    log_info(logtxqueue, "Reconfiguring logging thread");
-                    settings = new_settings.clone();
-                    init_logging(settings);
-                },
-            }
+    #[allow(unused)]
+    pub fn log_debug(& self, message: String) {
+        if !self.logtx.is_none() {
+            let logtx = self.logtx.as_ref().unwrap().clone();
+            logtx.try_send(create_log_message(Level::Debug, &message)).unwrap();
         }
     }
 
-    drop(logqueue);
-    drop(ctlqueue);
+    #[allow(unused)]
+    pub fn log_info(& self, message: String) {
+        if !self.logtx.is_none() {
+            let logtx = self.logtx.as_ref().unwrap().clone();
+            logtx.try_send(create_log_message(Level::Info, &message)).unwrap();
+        }
+    }
 
-    info!("Shutting down Logging thread");
+    #[allow(unused)]
+    pub fn log_warn(& self, message: String) {
+        if !self.logtx.is_none() {
+            let logtx = self.logtx.as_ref().unwrap().clone();
+            logtx.try_send(create_log_message(Level::Warn, &message)).unwrap();
+        }
+    }
+
+    #[allow(unused)]
+    pub fn log_error(& self, message: String) {
+        if !self.logtx.is_none() {
+            let logtx = self.logtx.as_ref().clone().unwrap();
+            logtx.try_send(create_log_message(Level::Error, &message)).unwrap();
+        }
+    }
 }
 
+
+pub async fn do_log_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, ctlqueue: broadcast::Sender<ControlSignal>, 
+    logrx: mpsc::Receiver<LogMessage>) {
+
+    let _ = tokio::spawn(async move {
+        let logger = LOGGER.read().await;
+        logger.log_thread(barrier, shutdown_barrier, ctlqueue, logrx).await;
+    });
+}
+
+#[allow(unused)]
+pub fn log_trace(message: &str) {
+    let msg = String::from(message);
+    let _ = tokio::spawn(async move {
+        let mut logger = LOGGER.read().await;
+        logger.log_trace(msg);    
+    });
+}
+
+#[allow(unused)]
+pub fn log_debug(message: &str) {
+    let msg = String::from(message);
+    let _ = tokio::spawn(async move {
+        let mut logger = LOGGER.read().await;
+        logger.log_debug(msg);    
+    });
+}
+
+#[allow(unused)]
+pub fn log_info(message: &str) {
+    let msg = String::from(message);
+    let _ = tokio::spawn(async move {
+        let mut logger = LOGGER.read().await;
+        logger.log_info(msg);   
+    });
+}
+
+#[allow(unused)]
+pub fn log_warn(message: &str) {
+    let msg = String::from(message);
+    let _ = tokio::spawn(async move {
+        let mut logger = LOGGER.read().await;
+        logger.log_warn(msg);    
+    });
+}
+
+#[allow(unused)]
+pub fn log_error(message: &str) {
+    let msg = String::from(message);
+    let _ = tokio::spawn(async move {
+        let mut logger = LOGGER.read().await;
+        logger.log_error(msg);
+    });
+}

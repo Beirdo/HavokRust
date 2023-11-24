@@ -12,14 +12,12 @@ use tokio::signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, Barrier};
 use settings::Settings;
-use server::{Server, do_server_thread};
+use server::do_server_thread;
 use dnslookup::do_dns_lookup_thread;
 use logging::*;
 use std::sync::Arc;
 use std::env;
 use std::process;
-
-use crate::ansicolors::AnsiColors;
 
 
 #[derive(Debug, Clone)]
@@ -36,13 +34,16 @@ async fn main() {
     
     let (logtx, logrx) = mpsc::channel::<LogMessage>(256);
 
-    log_info(&logtx, &format!("Starting {}", appname));
+    Logging::set_logqueue(&logtx).await;
 
-    AnsiColors::set_logqueue(&logtx);
-    Server::set_logqueue(&logtx).await;
+    log_info(&format!("Starting {}", appname));
 
-    let mut settings = Settings::new(&appname, &logtx).unwrap().clone();
-    log_info(&logtx, &format!("Settings: {:?}", settings));
+    let mut settings = Settings::new(&appname).unwrap().clone();
+    log_info(&format!("Settings: {:?}", settings));
+
+    let logfile = settings.global.log_file.clone();
+    Logging::set_logfile(logfile).await;
+    Logging::set_debug(settings.debug).await;
 
     let profile = settings.mud.aws_profile.clone();
     if profile.len() != 0 {
@@ -61,16 +62,15 @@ async fn main() {
     // Start logging thread
     let log_barrier = barrier.clone();
     let log_shdn_barrier = shutdown_barrier.clone();
-    let log_ctlrx = ctltx.subscribe();
-    let log_logtx = logtx.clone();
+    let log_ctltx = ctltx.clone();
     let log_handle = tokio::spawn(async move {
-         do_log_thread(log_barrier, log_shdn_barrier, log_ctlrx, &log_logtx, logrx).await; 
+        do_log_thread(log_barrier, log_shdn_barrier, log_ctltx, logrx).await; 
     });
-    log_info(&logtx, &format!("Log Thread: {:?}", log_handle));
+    log_info(&format!("Log Thread: {:?}", log_handle));
     task_handle_list.push(log_handle);
     
     // Start Ctrl-C handler thread
-    log_info(&logtx, "Starting Ctrl-C Handler thread");
+    log_info("Starting Ctrl-C Handler thread");
     let ctrlc_ctltx = ctltx.clone();
     let ctrlc_handle = tokio::spawn(async move {
         signal::ctrl_c().await.unwrap();
@@ -80,7 +80,7 @@ async fn main() {
             process::exit(1);
         });
     });
-    log_info(&logtx, &format!("Ctrl-C Thread: {:?}", ctrlc_handle));
+    log_info(&format!("Ctrl-C Thread: {:?}", ctrlc_handle));
     task_handle_list.push(ctrlc_handle);
 
     // Start SIGHUP handler thread
@@ -88,9 +88,8 @@ async fn main() {
     let sighup_shdn_barrier = shutdown_barrier.clone();
     let sighup_ctltx = ctltx.clone();
     let mut sighup_ctlrx = ctltx.subscribe();
-    let sighup_logtx = logtx.clone();
     let sighup_handle = tokio::spawn(async move {
-        log_info(&sighup_logtx, "Starting SIGHUP Handler thread");
+        log_info("Starting SIGHUP Handler thread");
     
         let _ = sighup_barrier.wait().await;
 
@@ -108,40 +107,39 @@ async fn main() {
                     };
                 }, 
                 _ = stream.recv() => {
-                    log_info(&sighup_logtx, "Recieved SIGHUP, reloading config");
-                    let new_settings = Settings::new(&appname, &sighup_logtx).unwrap().clone();
+                    log_info("Recieved SIGHUP, reloading config");
+                    let new_settings = Settings::new(&appname).unwrap().clone();
                     let ctrlsignal = ControlSignal::Reconfigure(new_settings.clone());
                     sighup_ctltx.send(ctrlsignal.clone()).unwrap_or_else(|e| panic!("Error: {:?}", e));
+                    Logging::set_debug(new_settings.debug).await;
                 },
             }
         }
     
-        log_info(&sighup_logtx, "Shutting down SIGHUP Handler thread");
+        log_info("Shutting down SIGHUP Handler thread");
         let _ = sighup_shdn_barrier.wait().await;
     });
-    log_info(&logtx, &format!("SIGHUP Thread: {:?}", sighup_handle));
+    log_info(&format!("SIGHUP Thread: {:?}", sighup_handle));
     task_handle_list.push(sighup_handle);
 
     // Now we need to start the server thread
     let server_barrier = barrier.clone();
     let server_shdn_barrier = shutdown_barrier.clone();
     let server_ctltx = ctltx.clone();
-    let server_logtx = logtx.clone();
     let server_handle = tokio::spawn(async move {
-        do_server_thread(server_barrier, server_shdn_barrier, server_ctltx, &server_logtx).await;
+        do_server_thread(server_barrier, server_shdn_barrier, server_ctltx).await;
     });
-    log_info(&logtx, &format!("Server Thread: {:?}", server_handle));
+    log_info(&format!("Server Thread: {:?}", server_handle));
     task_handle_list.push(server_handle);
 
     // Start up the DNS Lookup thread
     let dns_barrier = barrier.clone();
     let dns_shdn_barrier = shutdown_barrier.clone();
     let dns_ctltx = ctltx.clone();
-    let dns_logtx = logtx.clone();
     let dns_handle = tokio::spawn(async move {
-        do_dns_lookup_thread(dns_barrier, dns_shdn_barrier, dns_ctltx, &dns_logtx).await;
+        do_dns_lookup_thread(dns_barrier, dns_shdn_barrier, dns_ctltx).await;
     });
-    log_info(&logtx, &format!("DNS Lookup Thread: {:?}", dns_handle));
+    log_info(&format!("DNS Lookup Thread: {:?}", dns_handle));
     task_handle_list.push(dns_handle);
 
     // Now wait for all the barriers
@@ -159,7 +157,7 @@ async fn main() {
             },
             ControlSignal::Reconfigure(new_settings) => {
                 settings = new_settings.clone();
-                log_info(&logtx, &format!("New Settings: {:?}", settings));
+                log_info(&format!("New Settings: {:?}", settings));
             },
         }
     } 

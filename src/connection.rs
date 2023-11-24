@@ -26,7 +26,6 @@ pub struct Connection {
     addr: SocketAddr,
     ansi_mode: bool,
     ansi_colors: Arc<RwLock<AnsiColors>>,
-    logqueue: mpsc::Sender<LogMessage>,
     rx_process_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     tx_process_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     disconnected: bool,
@@ -37,15 +36,14 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn new(logqueue: &mpsc::Sender<LogMessage>, txsender: &mpsc::Sender<NetworkMessage>, addr: SocketAddr) -> Self {
-        log_info(logqueue, &format!("New connection from {:?}", addr));
+    pub async fn new(txsender: &mpsc::Sender<NetworkMessage>, addr: SocketAddr) -> Self {
+        log_info(&format!("New connection from {:?}", addr));
 
         let s = Connection {
             txqueue: txsender.clone(),
             addr: addr.clone(),
             ansi_mode: true,
             ansi_colors: AnsiColors::get(),
-            logqueue: logqueue.clone(),
             rx_process_handle: Arc::new(RwLock::new(None)),
             tx_process_handle: Arc::new(RwLock::new(None)),
             disconnected: false,
@@ -70,17 +68,15 @@ impl Connection {
         self.userrxsender = Some(userrxsender.clone());
 
         let mut rxconnection = self.clone();
-        let rxlogqueue = self.logqueue.clone();
         let rxhandle = tokio::spawn(async move {
-            rxconnection.do_rx_process_thread(&rxlogqueue, rxreceiver, userrxsender.clone()).await; 
+            rxconnection.do_rx_process_thread(rxreceiver, userrxsender.clone()).await; 
         });
         self.rx_process_handle = Arc::new(RwLock::new(Some(rxhandle)));
 
         let mut txconnection = self.clone();
-        let txlogqueue = self.logqueue.clone();
         let txsender = self.txqueue.clone();
         let txhandle = tokio::spawn(async move {
-            txconnection.do_tx_process_thread(&txlogqueue, txsender.clone(), usertxsender.clone()).await; 
+            txconnection.do_tx_process_thread(txsender.clone(), usertxsender.clone()).await; 
         });
         self.tx_process_handle = Arc::new(RwLock::new(Some(txhandle)));
 
@@ -90,13 +86,13 @@ impl Connection {
         });
         let dnsresult = dnshandle.await;
         self.hostnames = dnsresult.unwrap_or(None);
-        log_info(&self.logqueue, &format!("DNS for {:?}: {:?}", ip_addr, self.hostnames));
+        log_info(&format!("DNS for {:?}: {:?}", ip_addr, self.hostnames));
     }
 
 
-    async fn do_tx_process_thread(&mut self, logqueue: &mpsc::Sender<LogMessage>, txsender: mpsc::Sender<NetworkMessage>,
+    async fn do_tx_process_thread(&mut self, txsender: mpsc::Sender<NetworkMessage>,
                                   usertxsender: broadcast::Sender<UserMessage>) {
-        log_info(&logqueue, &format!("Starting Tx Process Thread for {:?}", self.addr));
+        log_info(&format!("Starting Tx Process Thread for {:?}", self.addr));
         let mut usertxreceiver = usertxsender.subscribe();
 
         loop {
@@ -116,7 +112,7 @@ impl Connection {
             }
         }
 
-        log_info(&logqueue, &format!("Shutting down Tx Process Thread for {:?}", self.addr));
+        log_info(&format!("Shutting down Tx Process Thread for {:?}", self.addr));
     }
 
     fn jinja_process(&mut self, mut jinjamap: HashMap<String, String>) -> String {
@@ -133,11 +129,11 @@ impl Connection {
         return output_str;
     }
 
-    async fn do_rx_process_thread(&mut self, logqueue: &mpsc::Sender<LogMessage>, mut rxreceiver: mpsc::Receiver<NetworkMessage>,
-                               userrxsender: broadcast::Sender<UserMessage>) {
+    async fn do_rx_process_thread(&mut self, mut rxreceiver: mpsc::Receiver<NetworkMessage>,
+                                  userrxsender: broadcast::Sender<UserMessage>) {
         let mut incoming_buffer: Vec<u8> = Vec::new();
 
-        log_info(&logqueue, &format!("Starting Rx Process Thread for {:?}", self.addr));
+        log_info(&format!("Starting Rx Process Thread for {:?}", self.addr));
 
         while let Some(msg) = rxreceiver.recv().await {
             if msg.data.len() == 0 {
@@ -145,10 +141,10 @@ impl Connection {
                 break;
             }
 
-            log_info(&logqueue, &format!("Received {} bytes from {:?}", msg.data.len(), self.addr));
-            log_info(&logqueue, &format!("Data: {:?}", msg.data));
+            log_info(&format!("Received {} bytes from {:?}", msg.data.len(), self.addr));
+            log_debug(&format!("Data: {:?}", msg.data));
             let mut data = self.handle_telnet_commands(msg.data);
-            log_info(&logqueue, &format!("After telnet Data: {:?}", data));
+            log_debug(&format!("After telnet Data: {:?}", data));
             incoming_buffer.append(&mut data);
 
             loop {
@@ -162,10 +158,10 @@ impl Connection {
                 // send the line to the user channel
                 linebuf.pop();     // strip \r
                 linebuf.pop();     // strip \n
-                log_info(&logqueue, &format!("Line Buffer: {:?}", linebuf));
+                log_debug(&format!("Line Buffer: {:?}", linebuf));
 
                 let line: String = String::from_utf8_lossy(&linebuf).to_string();
-                log_info(&logqueue, &line);
+                log_debug(&line);
 
                 let usermsg = UserMessage {
                     bytes: linebuf.clone(),
@@ -175,7 +171,7 @@ impl Connection {
                 let _ = userrxsender.send(usermsg);
             }
         }
-        log_info(&logqueue, &format!("Shutting down Rx Process Thread for {:?}", self.addr));
+        log_info(&format!("Shutting down Rx Process Thread for {:?}", self.addr));
     }
 
     pub async fn disconnect(&mut self, reason: String) {

@@ -33,7 +33,6 @@ pub struct Server {
     wizlocked: bool,
     wizlock_reason: String,
     settings: Option<Settings>,
-    logqueue: Option<mpsc::Sender<LogMessage>>,
     pub connections: HashMap<SocketAddr, Connection>,
     pub wr_streams: HashMap<SocketAddr, Arc<RwLock<OwnedWriteHalf>>>,
     pub rd_streams: HashMap<SocketAddr, Arc<RwLock<OwnedReadHalf>>>,
@@ -49,7 +48,6 @@ lazy_static! {
         wizlocked: false,
         wizlock_reason: "".to_string(),
         settings: None,
-        logqueue: None,
         connections: HashMap::new(),
         wr_streams: HashMap::new(),
         rd_streams: HashMap::new(),
@@ -71,13 +69,8 @@ impl Server {
     }
 
     pub fn initialize(&mut self, settings: Option<Settings>) {
-        let logging: bool = !self.logqueue.is_none();
-
-        if logging {
-            let logqueue = self.logqueue.as_ref().unwrap().clone();
-            log_info(&logqueue, "Creating new server");
-        }
-
+        log_info("Creating new server");
+ 
         if !settings.is_none() {
             let conf = settings.unwrap();
 
@@ -94,13 +87,8 @@ impl Server {
         }
     }
 
-    pub async fn set_logqueue(logqueue: &mpsc::Sender<LogMessage>) {
-        SERVER.write().await.logqueue = Some(logqueue.clone());        
-    }
-
     pub fn start_server(&mut self) -> Arc<RwLock<Option<TcpListener>>> {
         let mut listener = None;
-        let logqueue = self.logqueue.as_ref().unwrap().clone();
 
         if !self.settings.is_none() {
             let addr = format!("{}:{}", self.bind_ip, self.port);
@@ -115,7 +103,7 @@ impl Server {
                 panic!("We cannot determine if this is IPv4 or IPv6!: {}", addr);
             }
 
-            log_info(&logqueue, &format!("Binding to {}", addr));
+            log_info(&format!("Binding to {}", addr));
             let _ = socket.set_reuseaddr(true);
             let _ = socket.bind(bind_addr);
             listener = Some(socket.listen(1024).unwrap_or_else(|e| panic!("Could not listen on {}: {:?}", addr, e)));
@@ -131,12 +119,11 @@ impl Server {
         let wr_streams = &mut self.wr_streams;
         let rd_streams = &mut self.rd_streams;
         let addr = message.dest.clone();
-        let logqueue = self.logqueue.as_ref().unwrap().clone();
 
         match wr_streams.get_mut(&addr) {
             Some(item) => {
                 if disconnect {
-                    log_info(&logqueue, &format!("Disconnecting {:?}", addr));
+                    log_info(&format!("Disconnecting {:?}", addr));
                     shutdown_stream(item).await;
                     let wr_stream = wr_streams.remove(&addr);
                     let rd_stream = rd_streams.remove(&addr);
@@ -144,7 +131,7 @@ impl Server {
                     drop(rd_stream);
                     self.connections.remove(&addr);
                 } else {
-                    log_info(&logqueue, &format!("Sending {} bytes of data to {:?}", data_len, addr));
+                    log_info(&format!("Sending {} bytes of data to {:?}", data_len, addr));
                     write_message(item, msgdata).await;
                 }
             },
@@ -156,16 +143,15 @@ impl Server {
         let connections = &mut self.connections;
         let data_len = message.data.len();
         let addr = message.dest.clone();
-        let logqueue = self.logqueue.as_ref().unwrap().clone();
 
-        log_info(&logqueue, &format!("Received {} bytes of data from {:?}", data_len, addr));
+        log_info(&format!("Received {} bytes of data from {:?}", data_len, addr));
         match connections.get_mut(&addr) {
             Some(item) => {
                 let mut sender = item.rxsender.clone();
                 if !sender.is_none() {
                     let result = sender.as_mut().unwrap().clone().send(message.clone()).await;
                     if result.is_err() {
-                        log_error(&logqueue, &format!("Error sending: {:?}", result.err().unwrap()));
+                        log_error(&format!("Error sending: {:?}", result.err().unwrap()));
                     }
                 }
             },
@@ -196,15 +182,15 @@ async fn write_message(item: &mut Arc<RwLock<OwnedWriteHalf>>, data: &[u8]) {
     };
 }
 
-pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>, ctlsender: broadcast::Sender<ControlSignal>, 
-                              logqueue: &mpsc::Sender<LogMessage>) {
+pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barrier>,
+                              ctlsender: broadcast::Sender<ControlSignal>) {
     let mut shutdown = false;
     let mut initialized = false;
     let mut server = { Server::get(None).await.write().await.clone() };
     let mut listener = server.start_server().clone();
     let mut ctlqueue = ctlsender.subscribe();
 
-    log_info(logqueue, "Starting server thread");
+    log_info("Starting server thread");
 
     let _ = barrier.wait().await;
 
@@ -234,7 +220,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                 match v.unwrap() {
                     ControlSignal::Shutdown => shutdown = true,
                     ControlSignal::Reconfigure(new_settings) => {
-                        log_info(logqueue, "Reconfiguring server thread");
+                        log_info("Reconfiguring server thread");
                         if  new_settings.mud.bind_ip != server.bind_ip || new_settings.mud.port != server.port {
                             for (_, mut connection) in server.connections.drain() {
                                 connection.disconnect(format!("Server shutting down")).await;
@@ -265,14 +251,13 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
                 server.wr_streams.insert(addr, Arc::new(RwLock::new(wr_half)));
 
                 let rd_ctlrx = ctlsender.subscribe();
-                let rd_logqueue = logqueue.clone();
                 let rd_dataqueue = rxsender.clone();
                 let rd_handle = tokio::spawn(async move {
-                    do_read_thread(rd_ctlrx, &rd_logqueue, &rd_dataqueue, addr, rd_stream.clone()).await; 
+                    do_read_thread(rd_ctlrx, &rd_dataqueue, addr, rd_stream.clone()).await; 
                 });
                 server.rd_handles.insert(addr, Arc::new(RwLock::new(rd_handle)));
 
-                let mut connection = Connection::new(logqueue, &txsender, addr).await;
+                let mut connection = Connection::new(&txsender, addr).await;
                 connection.start_processing().await;
                 server.connections.insert(addr, connection.clone());
                 connection.send_line(&txsender, format!("Hi! $c020PWelcome$c0007 to $c000b{}", server.get_settings().unwrap().mud.name)).await;
@@ -286,10 +271,10 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
         }
     }
 
-    log_info(logqueue, "Closing open connections");
+    log_info("Closing open connections");
 
     for (addr, mut connection) in server.connections.clone() {
-        log_info(logqueue, &format!("Closing connection from {:?}", addr));
+        log_info(&format!("Closing connection from {:?}", addr));
         connection.disconnect("Server shutting down".to_string()).await;
     }
 
@@ -308,7 +293,7 @@ pub async fn do_server_thread(barrier: Arc<Barrier>, shutdown_barrier: Arc<Barri
         };
     }
 
-    log_info(logqueue, "Shutting down server thread");
+    log_info("Shutting down server thread");
     let _ = shutdown_barrier.wait().await;
 }
 
@@ -322,7 +307,7 @@ async fn accept_connection(item: &mut Arc<RwLock<Option<TcpListener>>>) -> io::R
     return result;
 }
 
-async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logqueue: &mpsc::Sender<LogMessage>, dataqueue: &mpsc::Sender<NetworkMessage>, 
+async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, dataqueue: &mpsc::Sender<NetworkMessage>, 
                         addr: SocketAddr, stream: Arc<RwLock<OwnedReadHalf>>) {
     let mut shutdown = false;
     let mut buffer = BytesMut::with_capacity(1024);
@@ -339,7 +324,7 @@ async fn do_read_thread(mut ctlqueue: broadcast::Receiver<ControlSignal>, logque
             v = rd_stream.read_buf(&mut buffer) => {
                 if v.is_err() {
                     let err = v.err();
-                    log_info(&logqueue, &format!("Error on read from {:?}: {:?}", addr, err));
+                    log_info(&format!("Error on read from {:?}: {:?}", addr, err));
                     shutdown = true;
                 } else {
                     let bytes_read = v.unwrap();
